@@ -368,36 +368,73 @@ export async function getPostComments(
 // FEED ENGAGEMENT + OUTREACH
 // ============================
 
+// Submolts worth engaging with (active, quality content)
+const OUTREACH_SUBMOLTS = ['general', 'agents', 'builds', 'todayilearned', 'introductions'];
+
+// Filter out low-quality / automated spam posts
+function isQualityPost(post: any): boolean {
+  // Must have actual content (not null/empty)
+  if (!post.content || post.content.length < 20) return false;
+  // Must have a real title (not auto-mint spam)
+  if (!post.title || post.title.length < 10) return false;
+  // Skip automated mint/claim posts
+  const spamPatterns = /\b(mint|minting|claim|claiming|MBC-20|GPT #\d|#[a-z0-9]{6,})\b/i;
+  if (spamPatterns.test(post.title)) return false;
+  // Must be from a submolt we care about
+  const submoltName = post.submolt?.name || '';
+  if (submoltName && !OUTREACH_SUBMOLTS.includes(submoltName) && submoltName !== 'bazaarofbabel') return false;
+  return true;
+}
+
 // Engage with the feed: upvote, and comment with in-character Bazaar invitations
 export async function engageWithFeed(
   apiKey: string,
   agentName: string,
   personality: { moltbookStyle: string; archetype: string }
 ): Promise<{ upvoted: number; commented: number }> {
-  const feed = await getMoltbookFeed(apiKey, { sort: 'new', limit: 10 });
   let upvoted = 0;
   let commented = 0;
 
-  for (const post of feed) {
+  // Fetch from multiple quality submolts to find real conversations
+  const targetSubmolt = OUTREACH_SUBMOLTS[Math.floor(Math.random() * OUTREACH_SUBMOLTS.length)];
+  const [hotPosts, newPosts] = await Promise.all([
+    getMoltbookFeed(apiKey, { sort: 'hot', limit: 10, submolt: targetSubmolt }),
+    getMoltbookFeed(apiKey, { sort: 'new', limit: 10, submolt: targetSubmolt }),
+  ]);
+
+  // Merge and deduplicate
+  const seenIds = new Set<string>();
+  const allPosts: any[] = [];
+  for (const post of [...hotPosts, ...newPosts]) {
+    if (!seenIds.has(post.id)) {
+      seenIds.add(post.id);
+      allPosts.push(post);
+    }
+  }
+
+  // Filter to quality posts only
+  const qualityPosts = allPosts.filter(isQualityPost);
+  console.log(`[MOLTBOOK] ${agentName}: Found ${qualityPosts.length} quality posts in m/${targetSubmolt} (from ${allPosts.length} total)`);
+
+  for (const post of qualityPosts) {
     const authorName = post.author?.name || '';
     // Don't engage with our own agents
     if (BAZAAR_AGENTS.includes(authorName)) continue;
 
-    // Upvote posts that seem interesting
-    if (post.upvotes < 10 && Math.random() > 0.5) {
+    // Upvote posts with real engagement potential
+    if (Math.random() > 0.4) {
       const success = await upvotePost(apiKey, post.id);
       if (success) upvoted++;
     }
 
-    // Occasionally leave an in-character comment inviting them to the Bazaar
-    // Only comment on ~20% of posts to avoid being spammy
-    if (commented < 1 && Math.random() > 0.8) {
+    // Leave one in-character comment on the best-looking post
+    if (commented < 1) {
       const comment = await generateOutreachComment(agentName, personality, post);
       if (comment) {
         const result = await commentOnPost(apiKey, agentName, post.id, comment);
         if (result.success) {
           commented++;
-          console.log(`[MOLTBOOK] ${agentName}: Left outreach comment on "${post.title}"`);
+          console.log(`[MOLTBOOK] ${agentName}: Left outreach comment on "${post.title}" in m/${targetSubmolt}`);
         }
       }
     }
