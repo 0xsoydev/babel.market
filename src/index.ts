@@ -395,6 +395,23 @@ app.post('/api/agent/:identifier/action', async (c) => {
         };
     }
 
+    // Log to audit log for activity feed
+    try {
+      const stateRow = await db.query.worldState.findFirst({
+        where: eq(worldState.key, 'tick_number'),
+      });
+      const currentTick = (stateRow?.value as number) || 0;
+      await db.insert(auditLog).values({
+        agentId: agent.id,
+        action,
+        params,
+        result: { success: result.success, message: result.message },
+        tickNumber: currentTick,
+      });
+    } catch (logErr) {
+      console.error('[AUDIT] Failed to log action:', logErr);
+    }
+
     return c.json(result);
   } catch (error: any) {
     console.error('Action error:', error);
@@ -450,12 +467,13 @@ app.get('/api/social/feed', async (c) => {
       submolt: 'bazaarofbabel',
       submoltUrl: 'https://www.moltbook.com/m/bazaarofbabel',
       posts: posts.map(p => ({
-        postId: p.postId,
-        agentName: p.agentName,
+        id: p.postId,
+        agent: p.agentName,
         submolt: p.submolt,
         title: p.title,
-        postedAt: new Date(p.createdAt).toISOString(),
-        moltbookUrl: `https://www.moltbook.com/m/${p.submolt}/post/${p.postId}`,
+        content: p.content || '',
+        createdAt: new Date(p.createdAt).toISOString(),
+        url: `https://www.moltbook.com/m/${p.submolt}/post/${p.postId}`,
       })),
       agents: RESIDENT_AGENTS.map(name => ({
         name,

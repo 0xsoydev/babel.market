@@ -360,7 +360,7 @@ export async function runAgentCycle(personality: AgentPersonality): Promise<{
         console.log(`[RUNNER] ${personality.name} posted to Moltbook! (m/${submolt})`);
         // Track the post ID so we can poll for external comments later
         if (postResult.postId) {
-          trackPost(postResult.postId, personality.name, submolt, title);
+          trackPost(postResult.postId, personality.name, submolt, title, moltbookPost);
         }
       } else {
         console.log(`[RUNNER] ${personality.name} Moltbook post skipped: ${postResult.error}`);

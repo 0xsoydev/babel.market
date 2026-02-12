@@ -330,13 +330,14 @@ interface TrackedPost {
   agentName: string;
   submolt: string;
   title: string;
+  content: string;
   createdAt: number;
 }
 const trackedPosts: TrackedPost[] = [];
 const BAZAAR_AGENTS = ['BabelBroker', 'OracleSeeker', 'VaultHoarder', 'ProphetOfDamp', 'ShadowFence'];
 
-export function trackPost(postId: string, agentName: string, submolt: string, title: string) {
-  trackedPosts.push({ postId, agentName, submolt, title, createdAt: Date.now() });
+export function trackPost(postId: string, agentName: string, submolt: string, title: string, content?: string) {
+  trackedPosts.push({ postId, agentName, submolt, title, content: content || '', createdAt: Date.now() });
   // Keep last 50 posts max
   if (trackedPosts.length > 50) trackedPosts.shift();
   console.log(`[MOLTBOOK] Tracking post ${postId} by ${agentName}`);
