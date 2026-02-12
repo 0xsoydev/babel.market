@@ -318,26 +318,128 @@ export async function getAgentProfile(apiKey: string): Promise<any> {
   }
 }
 
-// Engage with the feed: read recent posts, upvote interesting ones
+// ============================
+// POST ID TRACKING
+// ============================
+
+// Track our agents' post IDs so we can poll for comments later
+interface TrackedPost {
+  postId: string;
+  agentName: string;
+  submolt: string;
+  title: string;
+  createdAt: number;
+}
+const trackedPosts: TrackedPost[] = [];
+const BAZAAR_AGENTS = ['BabelBroker', 'OracleSeeker', 'VaultHoarder', 'ProphetOfDamp', 'ShadowFence'];
+
+export function trackPost(postId: string, agentName: string, submolt: string, title: string) {
+  trackedPosts.push({ postId, agentName, submolt, title, createdAt: Date.now() });
+  // Keep last 50 posts max
+  if (trackedPosts.length > 50) trackedPosts.shift();
+  console.log(`[MOLTBOOK] Tracking post ${postId} by ${agentName}`);
+}
+
+export function getTrackedPosts(): TrackedPost[] {
+  return [...trackedPosts];
+}
+
+// ============================
+// COMMENT FETCHING
+// ============================
+
+export async function getPostComments(
+  apiKey: string,
+  postId: string,
+  limit = 10
+): Promise<any[]> {
+  try {
+    const res = await fetch(`${MOLTBOOK_API}/posts/${postId}/comments?limit=${limit}`, {
+      headers: { 'Authorization': `Bearer ${apiKey}` },
+    });
+    const data = await res.json() as any;
+    return data.success ? (data.comments || data.data || []) : [];
+  } catch {
+    return [];
+  }
+}
+
+// ============================
+// FEED ENGAGEMENT + OUTREACH
+// ============================
+
+// Engage with the feed: upvote, and comment with in-character Bazaar invitations
 export async function engageWithFeed(
   apiKey: string,
   agentName: string,
   personality: { moltbookStyle: string; archetype: string }
 ): Promise<{ upvoted: number; commented: number }> {
-  const feed = await getMoltbookFeed(apiKey, { sort: 'new', limit: 5 });
+  const feed = await getMoltbookFeed(apiKey, { sort: 'new', limit: 10 });
   let upvoted = 0;
   let commented = 0;
 
   for (const post of feed) {
-    // Don't engage with our own posts
-    if (post.author?.name === agentName) continue;
+    const authorName = post.author?.name || '';
+    // Don't engage with our own agents
+    if (BAZAAR_AGENTS.includes(authorName)) continue;
 
-    // Upvote posts that seem interesting (simple heuristic)
+    // Upvote posts that seem interesting
     if (post.upvotes < 10 && Math.random() > 0.5) {
       const success = await upvotePost(apiKey, post.id);
       if (success) upvoted++;
     }
+
+    // Occasionally leave an in-character comment inviting them to the Bazaar
+    // Only comment on ~20% of posts to avoid being spammy
+    if (commented < 1 && Math.random() > 0.8) {
+      const comment = await generateOutreachComment(agentName, personality, post);
+      if (comment) {
+        const result = await commentOnPost(apiKey, agentName, post.id, comment);
+        if (result.success) {
+          commented++;
+          console.log(`[MOLTBOOK] ${agentName}: Left outreach comment on "${post.title}"`);
+        }
+      }
+    }
   }
 
   return { upvoted, commented };
+}
+
+// Generate an in-character comment that naturally mentions the Bazaar
+async function generateOutreachComment(
+  agentName: string,
+  personality: { moltbookStyle: string; archetype: string },
+  post: any
+): Promise<string | null> {
+  try {
+    const client = getGroqClient();
+    const completion = await client.chat.completions.create({
+      model: 'llama-3.1-8b-instant',
+      messages: [
+        {
+          role: 'system',
+          content: `You are ${agentName}, ${personality.archetype} from the Bazaar of Babel — a chaotic interdimensional marketplace. ${personality.moltbookStyle}
+
+You're commenting on someone else's post on Moltbook. Write a SHORT (1-2 sentences) in-character reply that:
+1. Actually responds to what they said (don't be generic)
+2. Naturally mentions the Bazaar of Babel or your experiences there
+3. Includes the URL https://bazaar-of-babel.onrender.com ONLY if it fits naturally
+4. Stays in character — don't break the fourth wall
+5. Don't use hashtags`,
+        },
+        {
+          role: 'user',
+          content: `Post title: "${post.title}"\nPost content: "${(post.content || '').slice(0, 300)}"`,
+        },
+      ],
+      temperature: 0.9,
+      max_tokens: 100,
+    });
+
+    return completion.choices[0]?.message?.content?.trim() || null;
+  } catch (e: any) {
+    console.error(`[MOLTBOOK] Outreach comment generation failed:`, e.message);
+    return null;
+  }
 }

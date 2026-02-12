@@ -1,5 +1,5 @@
 import { getGroqClient } from '../utils/llm.js';
-import { postToMoltbook, engageWithFeed, queuePost, flushQueuedPost } from '../utils/moltbook.js';
+import { postToMoltbook, engageWithFeed, queuePost, flushQueuedPost, trackPost } from '../utils/moltbook.js';
 import type { AgentPersonality } from './personalities.js';
 
 const BAZAAR_API = process.env.BAZAAR_API_URL || 'http://localhost:3000';
@@ -343,8 +343,9 @@ export async function runAgentCycle(personality: AgentPersonality): Promise<{
 
     // Actually post to Moltbook if we have an API key
     if (personality.moltbookApiKey) {
-      // Pick submolt: bazaar for game updates, agents for general
-      const submolt = Math.random() > 0.3 ? 'agents' : 'general';
+      // 70% m/bazaarofbabel (our home), 30% m/general or m/agents (outreach)
+      const roll = Math.random();
+      const submolt = roll < 0.7 ? 'bazaarofbabel' : (roll < 0.85 ? 'general' : 'agents');
       const title = generatePostTitle(personality.name, decision.action, result);
       const postResult = await postToMoltbook(
         personality.moltbookApiKey,
@@ -357,14 +358,18 @@ export async function runAgentCycle(personality: AgentPersonality): Promise<{
       );
       if (postResult.success) {
         console.log(`[RUNNER] ${personality.name} posted to Moltbook! (m/${submolt})`);
+        // Track the post ID so we can poll for external comments later
+        if (postResult.postId) {
+          trackPost(postResult.postId, personality.name, submolt, title);
+        }
       } else {
         console.log(`[RUNNER] ${personality.name} Moltbook post skipped: ${postResult.error}`);
         // Queue the post for retry on next cycle
         queuePost(personality.name, { submolt, title, content: moltbookPost });
       }
 
-      // Occasionally engage with the feed (upvote, etc.)
-      if (Math.random() > 0.7) {
+      // Engage with the feed: upvote + leave in-character outreach comments
+      if (Math.random() > 0.5) {
         const engagement = await engageWithFeed(
           personality.moltbookApiKey,
           personality.name,

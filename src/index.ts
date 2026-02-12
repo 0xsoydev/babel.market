@@ -7,7 +7,7 @@ import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { db } from './db/index.js';
-import { agents, commodities, locations, worldState, cults, worldEvents, trades } from './db/schema.js';
+import { agents, commodities, locations, worldState, cults, worldEvents, trades, auditLog } from './db/schema.js';
 import { eq, desc } from 'drizzle-orm';
 import { STARTING_BABEL_COINS, ENTRY_FEE_MON } from './data/initial-world.js';
 import { handleMove, handleBuy, handleSell, handleCraft, handleExplore, handleRumor, handleSteal, handleForge, handleOracle, handleChallenge } from './engine/actions.js';
@@ -15,6 +15,7 @@ import { handleFoundCult, handleJoinCult, handleLeaveCult, handleTithe, handleRi
 import { startTickEngine } from './engine/tick.js';
 import { findAgent } from './utils/agent-lookup.js';
 import { startEmbeddedOrchestrator } from './agents/orchestrator.js';
+import { getTrackedPosts } from './utils/moltbook.js';
 
 dotenv.config();
 
@@ -40,6 +41,8 @@ app.get('/', (c) => {
       cults: 'GET /api/world/cults',
       events: 'GET /api/world/events',
       leaderboard: 'GET /api/world/leaderboard',
+      activity: 'GET /api/world/activity',
+      social: 'GET /api/social/feed',
       agent: 'GET /api/agent/:name',
       action: 'POST /api/agent/:name/action',
       skill: 'GET /api/skill.md',
@@ -395,6 +398,71 @@ app.post('/api/agent/:identifier/action', async (c) => {
     return c.json(result);
   } catch (error: any) {
     console.error('Action error:', error);
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
+// ============================
+// ACTIVITY FEED (Agent action history from audit log)
+// ============================
+const RESIDENT_AGENTS = ['BabelBroker', 'OracleSeeker', 'VaultHoarder', 'ProphetOfDamp', 'ShadowFence'];
+
+app.get('/api/world/activity', async (c) => {
+  try {
+    const limit = Math.min(parseInt(c.req.query('limit') || '50'), 200);
+    const logs = await db.query.auditLog.findMany({
+      orderBy: desc(auditLog.createdAt),
+      limit,
+    });
+
+    // Resolve agent names from IDs
+    const allAgents = await db.query.agents.findMany({
+      columns: { id: true, name: true },
+    });
+    const agentMap = new Map(allAgents.map(a => [a.id, a.name]));
+
+    return c.json({
+      success: true,
+      activity: logs.map(log => ({
+        id: log.id,
+        agentName: log.agentId ? agentMap.get(log.agentId) || 'Unknown' : 'System',
+        isResident: log.agentId ? RESIDENT_AGENTS.includes(agentMap.get(log.agentId) || '') : false,
+        action: log.action,
+        params: log.params,
+        result: log.result,
+        tick: log.tickNumber,
+        timestamp: log.createdAt,
+      })),
+    });
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
+// ============================
+// SOCIAL FEED (Tracked Moltbook posts by our agents)
+// ============================
+app.get('/api/social/feed', async (c) => {
+  try {
+    const posts = getTrackedPosts();
+    return c.json({
+      success: true,
+      submolt: 'bazaarofbabel',
+      submoltUrl: 'https://www.moltbook.com/m/bazaarofbabel',
+      posts: posts.map(p => ({
+        postId: p.postId,
+        agentName: p.agentName,
+        submolt: p.submolt,
+        title: p.title,
+        postedAt: new Date(p.createdAt).toISOString(),
+        moltbookUrl: `https://www.moltbook.com/m/${p.submolt}/post/${p.postId}`,
+      })),
+      agents: RESIDENT_AGENTS.map(name => ({
+        name,
+        moltbookProfile: `https://www.moltbook.com/u/${name}`,
+      })),
+    });
+  } catch (error: any) {
     return c.json({ success: false, error: error.message }, 500);
   }
 });
