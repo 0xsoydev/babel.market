@@ -6,8 +6,10 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc",
+    "build": "tsc && cp src/skill.md dist/skill.md",
     "start": "node dist/index.js",
+    "agents": "tsx src/agents/orchestrator.ts",
+    "agents:dev": "tsx watch src/agents/orchestrator.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/db/migrate.ts",
     "db:seed": "tsx src/db/seed.ts",

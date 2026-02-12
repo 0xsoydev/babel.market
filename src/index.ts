@@ -3,6 +3,9 @@ import { serve } from '@hono/node-server';
 import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
 import dotenv from 'dotenv';
+import { readFileSync } from 'fs';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
 import { db } from './db/index.js';
 import { agents, commodities, locations, worldState, cults, worldEvents, trades } from './db/schema.js';
 import { eq, desc } from 'drizzle-orm';
@@ -11,6 +14,7 @@ import { handleMove, handleBuy, handleSell, handleCraft, handleExplore, handleRu
 import { handleFoundCult, handleJoinCult, handleLeaveCult, handleTithe, handleRitual, handleDeclareWar } from './engine/cults.js';
 import { startTickEngine } from './engine/tick.js';
 import { findAgent } from './utils/agent-lookup.js';
+import { startEmbeddedOrchestrator } from './agents/orchestrator.js';
 
 dotenv.config();
 
@@ -51,6 +55,32 @@ app.get('/', (c) => {
 // ============================
 // ENTRY
 // ============================
+
+// Serve skill.md for agent discovery
+app.get('/skill.md', (c) => {
+  try {
+    const __filename = fileURLToPath(import.meta.url);
+    const __dirname = dirname(__filename);
+    const skillContent = readFileSync(join(__dirname, 'skill.md'), 'utf-8');
+    c.header('Content-Type', 'text/markdown; charset=utf-8');
+    return c.body(skillContent);
+  } catch {
+    return c.text('# Bazaar of Babel\n\nSee https://bazaar-of-babel.onrender.com for API docs.', 200);
+  }
+});
+
+app.get('/api/skill.md', (c) => {
+  try {
+    const __filename = fileURLToPath(import.meta.url);
+    const __dirname = dirname(__filename);
+    const skillContent = readFileSync(join(__dirname, 'skill.md'), 'utf-8');
+    c.header('Content-Type', 'text/markdown; charset=utf-8');
+    return c.body(skillContent);
+  } catch {
+    return c.text('# Bazaar of Babel\n\nSee https://bazaar-of-babel.onrender.com for API docs.', 200);
+  }
+});
+
 app.get('/api/enter/instructions', (c) => {
   return c.json({
     success: true,
@@ -391,3 +421,11 @@ console.log(`
 
 // Start the tick engine
 startTickEngine();
+
+// Start embedded agent orchestrator (runs agents in-process)
+if (process.env.RUN_AGENTS !== 'false') {
+  // Delay 30s to let server stabilize before agents start hitting it
+  setTimeout(() => {
+    startEmbeddedOrchestrator();
+  }, 30000);
+}

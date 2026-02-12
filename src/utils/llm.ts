@@ -1,16 +1,37 @@
 import Groq from 'groq-sdk';
 
-const groqClients = [
-  new Groq({ apiKey: process.env.GROQ_API_KEY_1 }),
-  new Groq({ apiKey: process.env.GROQ_API_KEY_2 }),
-  new Groq({ apiKey: process.env.GROQ_API_KEY_3 }),
-];
-
+// Lazy init to ensure env vars are loaded
+let groqClients: Groq[] | null = null;
 let currentKeyIndex = 0;
 
+function initClients() {
+  if (groqClients) return;
+  
+  const keys = [
+    process.env.GROQ_API_KEY_1,
+    process.env.GROQ_API_KEY_2,
+    process.env.GROQ_API_KEY_3,
+    process.env.GROQ_API_KEY_4,
+    process.env.GROQ_API_KEY_5,
+    process.env.GROQ_API_KEY_6,
+    process.env.GROQ_API_KEY_7,
+    process.env.GROQ_API_KEY_8,
+    process.env.GROQ_API_KEY_9,
+    process.env.GROQ_API_KEY_10,
+  ].filter(Boolean) as string[];
+
+  if (keys.length === 0) {
+    throw new Error('No GROQ_API_KEY_* environment variables found');
+  }
+
+  groqClients = keys.map(key => new Groq({ apiKey: key }));
+  console.log(`[LLM] Initialized ${groqClients.length} Groq clients`);
+}
+
 export function getGroqClient(): Groq {
-  const client = groqClients[currentKeyIndex];
-  currentKeyIndex = (currentKeyIndex + 1) % groqClients.length;
+  initClients();
+  const client = groqClients![currentKeyIndex];
+  currentKeyIndex = (currentKeyIndex + 1) % groqClients!.length;
   return client;
 }
 
