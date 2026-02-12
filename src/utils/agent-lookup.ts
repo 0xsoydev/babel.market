@@ -34,7 +34,7 @@ export async function findCommodity(input: string) {
   if (exact) return exact;
 
   // 2. Case-insensitive slug match (e.g., "Paradox" -> "paradox")
-  const lowerSlug = input.toLowerCase().replace(/\s+/g, '_');
+  const lowerSlug = input.toLowerCase().replace(/['\u2019]/g, '').replace(/\s+/g, '_');
   const bySlug = await db.query.commodities.findFirst({
     where: eq(commodities.name, lowerSlug),
   });

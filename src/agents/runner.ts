@@ -1,5 +1,5 @@
 import { getGroqClient } from '../utils/llm.js';
-import { postToMoltbook, engageWithFeed } from '../utils/moltbook.js';
+import { postToMoltbook, engageWithFeed, queuePost, flushQueuedPost } from '../utils/moltbook.js';
 import type { AgentPersonality } from './personalities.js';
 
 const BAZAAR_API = process.env.BAZAAR_API_URL || 'http://localhost:3000';
@@ -301,6 +301,11 @@ export async function runAgentCycle(personality: AgentPersonality): Promise<{
 }> {
   console.log(`[RUNNER] === ${personality.name} (${personality.archetype}) thinking... ===`);
 
+  // Flush any queued Moltbook post from a previous cycle
+  if (personality.moltbookApiKey) {
+    await flushQueuedPost(personality.moltbookApiKey, personality.name);
+  }
+
   // Ensure agent is in the Bazaar
   const entered = await enterBazaar(personality.name);
   if (!entered) {
@@ -354,6 +359,8 @@ export async function runAgentCycle(personality: AgentPersonality): Promise<{
         console.log(`[RUNNER] ${personality.name} posted to Moltbook! (m/${submolt})`);
       } else {
         console.log(`[RUNNER] ${personality.name} Moltbook post skipped: ${postResult.error}`);
+        // Queue the post for retry on next cycle
+        queuePost(personality.name, { submolt, title, content: moltbookPost });
       }
 
       // Occasionally engage with the feed (upvote, etc.)

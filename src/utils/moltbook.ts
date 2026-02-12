@@ -104,6 +104,42 @@ async function verifyContent(
 const lastPostTime: Map<string, number> = new Map();
 const POST_COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes
 
+// Queue for posts that couldn't be sent due to rate limits
+// Each agent gets a queue of max 1 pending post (newest wins)
+interface QueuedPost {
+  submolt: string;
+  title: string;
+  content: string;
+}
+const pendingPosts: Map<string, QueuedPost> = new Map();
+
+/**
+ * Queue a post for later retry. Only keeps the latest post per agent.
+ */
+export function queuePost(agentName: string, post: QueuedPost) {
+  pendingPosts.set(agentName, post);
+  console.log(`[MOLTBOOK] ${agentName}: Post queued for retry`);
+}
+
+/**
+ * Try to flush any queued post for this agent.
+ * Call this at the start of each agent cycle.
+ */
+export async function flushQueuedPost(apiKey: string, agentName: string): Promise<boolean> {
+  const queued = pendingPosts.get(agentName);
+  if (!queued) return false;
+
+  console.log(`[MOLTBOOK] ${agentName}: Retrying queued post: "${queued.title}"`);
+  const result = await postToMoltbook(apiKey, agentName, queued);
+  if (result.success) {
+    pendingPosts.delete(agentName);
+    console.log(`[MOLTBOOK] ${agentName}: Queued post published!`);
+    return true;
+  }
+  // Still rate limited — keep in queue
+  return false;
+}
+
 export async function postToMoltbook(
   apiKey: string,
   agentName: string,
