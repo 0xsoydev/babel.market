@@ -5,6 +5,7 @@ import type { ActionResult } from '../types/index.js';
 import { addDecimals, subtractDecimals, multiplyDecimals, compareDecimals, formatDecimal, randomChance, randomChoice, randomBetween } from '../utils/math.js';
 import { STEAL_SUCCESS_RATE, FORGE_DETECTION_RATE, ORACLE_COST, JAIL_DURATION_TICKS, TICK_INTERVAL_MS } from '../data/initial-world.js';
 import { generateFlavorText, generateOracleProphecy } from '../utils/llm.js';
+import { findCommodity } from '../utils/agent-lookup.js';
 
 // ============================
 // Helper: get agent + jail check
@@ -71,13 +72,14 @@ export async function handleBuy(agentId: string, params: { commodity: string; qu
   const commodityName = params.commodity;
   const quantity = params.quantity || 1;
 
-  const commodity = await db.query.commodities.findFirst({
-    where: eq(commodities.name, commodityName),
-  });
+  const commodity = await findCommodity(commodityName);
 
   if (!commodity) {
     return { success: false, message: `Commodity "${commodityName}" not found` };
   }
+
+  // Use the canonical slug name for all DB operations
+  const slug = commodity.name;
 
   // Paradox Pit doubles everything
   const multiplier = agent.location === 'paradox_pit' ? 2 : 1;
@@ -96,16 +98,16 @@ export async function handleBuy(agentId: string, params: { commodity: string; qu
 
   // Add to inventory (upsert)
   const existing = await db.query.inventories.findFirst({
-    where: and(eq(inventories.agentId, agentId), eq(inventories.commodity, commodityName)),
+    where: and(eq(inventories.agentId, agentId), eq(inventories.commodity, slug)),
   });
 
   if (existing) {
     await db.update(inventories)
       .set({ quantity: addDecimals(existing.quantity, String(quantity)) })
-      .where(and(eq(inventories.agentId, agentId), eq(inventories.commodity, commodityName)));
+      .where(and(eq(inventories.agentId, agentId), eq(inventories.commodity, slug)));
   } else {
     await db.insert(inventories).values({
-      agentId, commodity: commodityName, quantity: formatDecimal(quantity, 4), isCounterfeit: false,
+      agentId, commodity: slug, quantity: formatDecimal(quantity, 4), isCounterfeit: false,
     });
   }
 
@@ -115,11 +117,11 @@ export async function handleBuy(agentId: string, params: { commodity: string; qu
   const newPrice = formatDecimal(pricePerUnit + priceChange);
   await db.update(commodities)
     .set({ supply: newSupply, currentPrice: newPrice })
-    .where(eq(commodities.name, commodityName));
+    .where(eq(commodities.name, slug));
 
   // Log trade
   await db.insert(trades).values({
-    agentId, buyCommodity: commodityName, buyQuantity: String(quantity),
+    agentId, buyCommodity: slug, buyQuantity: String(quantity),
     priceAtTrade: commodity.currentPrice, location: agent.location,
   });
 
@@ -140,18 +142,18 @@ export async function handleSell(agentId: string, params: { commodity: string; q
   const commodityName = params.commodity;
   const quantity = params.quantity || 1;
 
+  // Resolve commodity to get canonical slug
+  const commodity = await findCommodity(commodityName);
+  if (!commodity) return { success: false, message: `Commodity "${commodityName}" not found` };
+  const slug = commodity.name;
+
   const inv = await db.query.inventories.findFirst({
-    where: and(eq(inventories.agentId, agentId), eq(inventories.commodity, commodityName)),
+    where: and(eq(inventories.agentId, agentId), eq(inventories.commodity, slug)),
   });
 
   if (!inv || compareDecimals(inv.quantity, String(quantity)) < 0) {
-    return { success: false, message: `Insufficient ${commodityName}. Have ${inv?.quantity || 0}` };
+    return { success: false, message: `Insufficient ${commodity.displayName}. Have ${inv?.quantity || 0}` };
   }
-
-  const commodity = await db.query.commodities.findFirst({
-    where: eq(commodities.name, commodityName),
-  });
-  if (!commodity) return { success: false, message: 'Commodity not found' };
 
   // Paradox Pit doubles everything
   const multiplier = agent.location === 'paradox_pit' ? 2 : 1;
@@ -165,11 +167,11 @@ export async function handleSell(agentId: string, params: { commodity: string; q
   const newQty = subtractDecimals(inv.quantity, String(quantity));
   if (parseFloat(newQty) <= 0) {
     await db.delete(inventories)
-      .where(and(eq(inventories.agentId, agentId), eq(inventories.commodity, commodityName)));
+      .where(and(eq(inventories.agentId, agentId), eq(inventories.commodity, slug)));
   } else {
     await db.update(inventories)
       .set({ quantity: newQty })
-      .where(and(eq(inventories.agentId, agentId), eq(inventories.commodity, commodityName)));
+      .where(and(eq(inventories.agentId, agentId), eq(inventories.commodity, slug)));
   }
 
   // Add coins
@@ -184,11 +186,11 @@ export async function handleSell(agentId: string, params: { commodity: string; q
   const newPrice = formatDecimal(Math.max(pricePerUnit - priceChange, parseFloat(commodity.basePrice) * 0.1));
   await db.update(commodities)
     .set({ supply: subtractDecimals(commodity.supply, String(quantity)), currentPrice: newPrice })
-    .where(eq(commodities.name, commodityName));
+    .where(eq(commodities.name, slug));
 
   // Log trade
   await db.insert(trades).values({
-    agentId, sellCommodity: commodityName, sellQuantity: String(quantity),
+    agentId, sellCommodity: slug, sellQuantity: String(quantity),
     priceAtTrade: commodity.currentPrice, location: agent.location,
   });
 
@@ -215,7 +217,11 @@ export async function handleCraft(agentId: string, params: { item1: string; item
   const { agent, error } = await getAgentOrFail(agentId);
   if (error) return error;
 
-  const { item1, item2 } = params;
+  // Resolve item names to canonical slugs
+  const resolved1 = await findCommodity(params.item1);
+  const resolved2 = await findCommodity(params.item2);
+  const item1 = resolved1?.name || params.item1.toLowerCase().replace(/\s+/g, '_');
+  const item2 = resolved2?.name || params.item2.toLowerCase().replace(/\s+/g, '_');
 
   // Find matching recipe
   const recipe = Object.entries(CRAFT_RECIPES).find(([_, r]) =>
@@ -385,10 +391,9 @@ export async function handleRumor(agentId: string, params: { commodity: string; 
 
   const { commodity: commodityName, direction } = params;
 
-  const commodity = await db.query.commodities.findFirst({
-    where: eq(commodities.name, commodityName),
-  });
+  const commodity = await findCommodity(commodityName);
   if (!commodity) return { success: false, message: `Commodity "${commodityName}" not found` };
+  const slug = commodity.name;
 
   // Whispering Corridor makes rumors 2x effective
   const effectiveness = agent.location === 'whispering_corridor' ? 2 : 1;
@@ -404,7 +409,7 @@ export async function handleRumor(agentId: string, params: { commodity: string; 
 
   await db.update(commodities)
     .set({ currentPrice: formatDecimal(newPrice) })
-    .where(eq(commodities.name, commodityName));
+    .where(eq(commodities.name, slug));
 
   // Reputation change
   const repChange = effectiveness;
@@ -532,10 +537,9 @@ export async function handleForge(agentId: string, params: { commodity: string; 
     return { success: false, message: `Forging costs ${forgeCost} BC. You have ${agent.babelCoins}` };
   }
 
-  const commodity = await db.query.commodities.findFirst({
-    where: eq(commodities.name, commodityName),
-  });
+  const commodity = await findCommodity(commodityName);
   if (!commodity) return { success: false, message: `Commodity "${commodityName}" not found` };
+  const slug = commodity.name;
 
   // Deduct cost
   await db.update(agents)
@@ -547,7 +551,7 @@ export async function handleForge(agentId: string, params: { commodity: string; 
 
   // Add counterfeit items
   const existing = await db.query.inventories.findFirst({
-    where: and(eq(inventories.agentId, agentId), eq(inventories.commodity, commodityName)),
+    where: and(eq(inventories.agentId, agentId), eq(inventories.commodity, slug)),
   });
 
   // Counterfeits are stored with isCounterfeit flag
@@ -556,10 +560,10 @@ export async function handleForge(agentId: string, params: { commodity: string; 
   if (existing) {
     await db.update(inventories)
       .set({ quantity: addDecimals(existing.quantity, String(quantity)) })
-      .where(and(eq(inventories.agentId, agentId), eq(inventories.commodity, commodityName)));
+      .where(and(eq(inventories.agentId, agentId), eq(inventories.commodity, slug)));
   } else {
     await db.insert(inventories).values({
-      agentId, commodity: commodityName, quantity: String(quantity), isCounterfeit: true,
+      agentId, commodity: slug, quantity: String(quantity), isCounterfeit: true,
     });
   }
 
