@@ -26,7 +26,9 @@ function cleanChallenge(text: string): string {
     .replace(/[^a-zA-Z0-9\s?,.']/g, '')  // strip special chars
     .replace(/\s+/g, ' ')                  // normalize spaces
     .toLowerCase()
-    .replace(/\b(um|uh|err|errr|lob|st|ob|werrr|lobster|lobsters|lxobqst|splitted|tennn)\b/gi, '')
+    // Deduplicate consecutive repeated characters: "thhiirrttyy" -> "thirty"
+    .replace(/(.)\1+/g, '$1')
+    .replace(/\b(um|uh|err|lob|st|ob|wer|lobster|lobsters|splitted)\b/gi, '')
     .replace(/\s+/g, ' ')
     .trim();
 }

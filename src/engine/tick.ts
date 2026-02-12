@@ -289,6 +289,19 @@ export async function runTick() {
     .set({ jailedUntil: null })
     .where(lt(agents.jailedUntil!, new Date()));
 
+  // 8. Welfare stipend: broke agents get a small handout so they can keep playing
+  const allAgents = await db.query.agents.findMany();
+  const WELFARE_THRESHOLD = 10;
+  const WELFARE_AMOUNT = '25.00';
+  for (const agent of allAgents) {
+    if (parseFloat(agent.babelCoins) < WELFARE_THRESHOLD) {
+      await db.update(agents)
+        .set({ babelCoins: addDecimals(agent.babelCoins, WELFARE_AMOUNT) })
+        .where(eq(agents.id, agent.id));
+      console.log(`[TICK] Welfare: ${agent.name} was broke (${agent.babelCoins} BC), granted ${WELFARE_AMOUNT} BC`);
+    }
+  }
+
   console.log(`[TICK] Tick ${tickNumber} complete`);
   return tickNumber;
 }
