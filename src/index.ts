@@ -8,7 +8,7 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { db } from './db/index.js';
 import { agents, commodities, locations, worldState, cults, worldEvents, trades, auditLog } from './db/schema.js';
-import { eq, desc } from 'drizzle-orm';
+import { eq, desc, sql } from 'drizzle-orm';
 import { STARTING_BABEL_COINS, ENTRY_FEE_MON } from './data/initial-world.js';
 import { handleMove, handleBuy, handleSell, handleCraft, handleExplore, handleRumor, handleSteal, handleForge, handleOracle, handleChallenge } from './engine/actions.js';
 import { handleFoundCult, handleJoinCult, handleLeaveCult, handleTithe, handleRitual, handleDeclareWar } from './engine/cults.js';
@@ -401,11 +401,13 @@ app.post('/api/agent/:identifier/action', async (c) => {
         where: eq(worldState.key, 'tick_number'),
       });
       const currentTick = (stateRow?.value as number) || 0;
+      // For 'move' actions, the location is the destination; otherwise it's the agent's current location
+      const actionLocation = action === 'move' ? (params.location || agent.location) : agent.location;
       await db.insert(auditLog).values({
         agentId: agent.id,
         action,
         params,
-        result: { success: result.success, message: result.message },
+        result: { success: result.success, message: result.message, location: actionLocation },
         tickNumber: currentTick,
       });
     } catch (logErr) {
@@ -427,10 +429,18 @@ const RESIDENT_AGENTS = ['BabelBroker', 'OracleSeeker', 'VaultHoarder', 'Prophet
 app.get('/api/world/activity', async (c) => {
   try {
     const limit = Math.min(parseInt(c.req.query('limit') || '50'), 200);
-    const logs = await db.query.auditLog.findMany({
-      orderBy: desc(auditLog.createdAt),
-      limit,
-    });
+    const location = c.req.query('location');
+
+    // If location filter is provided, use raw SQL to query JSONB result->>'location'
+    const logs = location
+      ? await db.select().from(auditLog)
+          .where(sql`${auditLog.result}->>'location' = ${location}`)
+          .orderBy(desc(auditLog.createdAt))
+          .limit(limit)
+      : await db.query.auditLog.findMany({
+          orderBy: desc(auditLog.createdAt),
+          limit,
+        });
 
     // Resolve agent names from IDs
     const allAgents = await db.query.agents.findMany({
@@ -459,6 +469,43 @@ app.get('/api/world/activity', async (c) => {
 // ============================
 // SOCIAL FEED (Tracked Moltbook posts by our agents)
 // ============================
+
+// Internal endpoint: runner calls this to log social posts into the audit log
+// so they appear in the activity feed alongside actions
+app.post('/api/agent/:identifier/social-post', async (c) => {
+  try {
+    const identifier = c.req.param('identifier');
+    const body = await c.req.json();
+    const { content, title, submolt } = body;
+
+    if (!content) {
+      return c.json({ success: false, error: 'content is required' }, 400);
+    }
+
+    const agent = await findAgent(identifier);
+    if (!agent) {
+      return c.json({ success: false, error: 'Agent not found' }, 404);
+    }
+
+    const stateRow = await db.query.worldState.findFirst({
+      where: eq(worldState.key, 'tick_number'),
+    });
+    const currentTick = (stateRow?.value as number) || 0;
+
+    await db.insert(auditLog).values({
+      agentId: agent.id,
+      action: 'social_post',
+      params: { title, submolt },
+      result: { success: true, message: content, location: agent.location },
+      tickNumber: currentTick,
+    });
+
+    return c.json({ success: true });
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
 app.get('/api/social/feed', async (c) => {
   try {
     const posts = getTrackedPosts();

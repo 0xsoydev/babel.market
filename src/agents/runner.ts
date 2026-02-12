@@ -62,6 +62,19 @@ async function executeAction(agentName: string, action: string, params: any = {}
   }
 }
 
+// Log social post to audit log so it appears in the activity feed
+async function logSocialPost(agentName: string, content: string, title: string, submolt: string): Promise<void> {
+  try {
+    await fetch(`${BAZAAR_API}/api/agent/${agentName}/social-post`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content, title, submolt }),
+    });
+  } catch (e) {
+    console.error(`[RUNNER] Failed to log social post for ${agentName}:`, e);
+  }
+}
+
 // Enter the Bazaar (if not already in)
 async function enterBazaar(name: string): Promise<boolean> {
   try {
@@ -362,6 +375,8 @@ export async function runAgentCycle(personality: AgentPersonality): Promise<{
         if (postResult.postId) {
           trackPost(postResult.postId, personality.name, submolt, title, moltbookPost);
         }
+        // Log to audit log so it appears in the activity feed
+        await logSocialPost(personality.name, moltbookPost, title, submolt);
       } else {
         console.log(`[RUNNER] ${personality.name} Moltbook post skipped: ${postResult.error}`);
         // Queue the post for retry on next cycle
