@@ -7,8 +7,8 @@ import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { db } from './db/index.js';
-import { agents, commodities, locations, worldState, cults, worldEvents, trades, auditLog } from './db/schema.js';
-import { eq, desc, sql } from 'drizzle-orm';
+import { agents, commodities, locations, worldState, cults, worldEvents, trades, auditLog, tradeOffers } from './db/schema.js';
+import { eq, desc, sql, gt, and } from 'drizzle-orm';
 import { STARTING_BABEL_COINS, ENTRY_FEE_MON } from './data/initial-world.js';
 import { handleMove, handleBuy, handleSell, handleCraft, handleExplore, handleRumor, handleSteal, handleForge, handleOracle, handleChallenge, handleOffer, handleAcceptOffer, handleListOffers } from './engine/actions.js';
 import { handleFoundCult, handleJoinCult, handleLeaveCult, handleTithe, handleRitual, handleDeclareWar } from './engine/cults.js';
@@ -16,6 +16,7 @@ import { startTickEngine } from './engine/tick.js';
 import { findAgent } from './utils/agent-lookup.js';
 import { startEmbeddedOrchestrator } from './agents/orchestrator.js';
 import { getTrackedPosts } from './utils/moltbook.js';
+import { AGENT_PERSONALITIES } from './agents/personalities.js';
 
 dotenv.config();
 
@@ -274,6 +275,35 @@ app.get('/api/world/leaderboard', async (c) => {
 // ============================
 // AGENT STATE
 // ============================
+
+// Get all resident agent wallets (for $BABEL token interactions)
+app.get('/api/agents/wallets', (c) => {
+  const wallets = AGENT_PERSONALITIES.map(p => ({
+    name: p.name,
+    archetype: p.archetype,
+    walletAddress: p.walletAddress || null,
+    moltbookProfile: `https://www.moltbook.com/u/${p.name}`,
+  }));
+
+  return c.json({
+    success: true,
+    treasury: {
+      address: process.env.BAZAAR_WALLET_ADDRESS || null,
+      description: 'Main Bazaar treasury wallet',
+    },
+    agents: wallets,
+    token: {
+      symbol: '$BABEL',
+      name: 'Bazaar of Babel Token',
+      // Will be populated once token is launched on nad.fun
+      contractAddress: process.env.BABEL_TOKEN_ADDRESS || null,
+      nadfunUrl: process.env.BABEL_TOKEN_ADDRESS
+        ? `https://nad.fun/tokens/${process.env.BABEL_TOKEN_ADDRESS}`
+        : null,
+    },
+  });
+});
+
 app.get('/api/agent/:identifier', async (c) => {
   try {
     const identifier = c.req.param('identifier');
@@ -427,6 +457,49 @@ app.post('/api/agent/:identifier/action', async (c) => {
     return c.json(result);
   } catch (error: any) {
     console.error('Action error:', error);
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
+// ============================
+// TRADE OFFERS (P2P Trading)
+// ============================
+app.get('/api/world/offers', async (c) => {
+  try {
+    // Get all open, non-expired trade offers
+    const offers = await db.select().from(tradeOffers)
+      .innerJoin(agents, eq(tradeOffers.fromAgentId, agents.id))
+      .where(and(
+        eq(tradeOffers.status, 'open'),
+        gt(tradeOffers.expiresAt, new Date())
+      ))
+      .orderBy(desc(tradeOffers.createdAt))
+      .limit(50);
+
+    // Get all commodities for display names
+    const allCommodities = await db.query.commodities.findMany();
+    const commodityMap = new Map(allCommodities.map(c => [c.name, c.displayName]));
+
+    return c.json({
+      success: true,
+      offers: offers.map(o => ({
+        id: o.trade_offers.id,
+        fromAgent: o.agents.name,
+        offer: {
+          commodity: commodityMap.get(o.trade_offers.offerCommodity) || o.trade_offers.offerCommodity,
+          quantity: o.trade_offers.offerQuantity,
+        },
+        want: {
+          commodity: commodityMap.get(o.trade_offers.wantCommodity) || o.trade_offers.wantCommodity,
+          quantity: o.trade_offers.wantQuantity,
+        },
+        location: o.trade_offers.location,
+        createdAt: o.trade_offers.createdAt,
+        expiresAt: o.trade_offers.expiresAt,
+        isOpenOffer: !o.trade_offers.toAgentId,
+      })),
+    });
+  } catch (error: any) {
     return c.json({ success: false, error: error.message }, 500);
   }
 });

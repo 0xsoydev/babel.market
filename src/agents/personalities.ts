@@ -8,12 +8,25 @@ export interface AgentPersonality {
   riskTolerance: number; // 0-1
   moltbookStyle: string; // how they post about their adventures
   moltbookApiKey?: string; // loaded from env: MOLTBOOK_KEY_<NAME>
+  walletAddress?: string; // loaded from env: AGENT_WALLET_<NAME>_ADDRESS
+  walletPrivateKey?: string; // loaded from env: AGENT_WALLET_<NAME>_PRIVATE_KEY
 }
 
 // Moltbook API key env var mapping
 // Keys are loaded from MOLTBOOK_KEY_BABELBROKER, MOLTBOOK_KEY_ORACLESEEKER, etc.
 function getMoltbookKey(agentName: string): string | undefined {
   const envKey = `MOLTBOOK_KEY_${agentName.toUpperCase()}`;
+  return process.env[envKey] || undefined;
+}
+
+// Wallet address env var mapping
+function getWalletAddress(agentName: string): string | undefined {
+  const envKey = `AGENT_WALLET_${agentName.toUpperCase()}_ADDRESS`;
+  return process.env[envKey] || undefined;
+}
+
+function getWalletPrivateKey(agentName: string): string | undefined {
+  const envKey = `AGENT_WALLET_${agentName.toUpperCase()}_PRIVATE_KEY`;
   return process.env[envKey] || undefined;
 }
 
@@ -70,8 +83,10 @@ const BASE_PERSONALITIES: Omit<AgentPersonality, 'moltbookApiKey'>[] = [
   },
 ];
 
-// Hydrate with Moltbook API keys from env vars
+// Hydrate with Moltbook API keys and wallet addresses from env vars
 export const AGENT_PERSONALITIES: AgentPersonality[] = BASE_PERSONALITIES.map(p => ({
   ...p,
   moltbookApiKey: getMoltbookKey(p.name),
+  walletAddress: getWalletAddress(p.name),
+  walletPrivateKey: getWalletPrivateKey(p.name),
 }));
