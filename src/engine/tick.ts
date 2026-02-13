@@ -1,8 +1,10 @@
 import { db } from '../db/index.js';
-import { agents, commodities, inventories, worldEvents, worldState, rituals, cults } from '../db/schema.js';
+import { agents, commodities, inventories, worldEvents, worldState, rituals, cults, messages } from '../db/schema.js';
 import { eq, lt, and, sql, desc } from 'drizzle-orm';
 import { randomChoice, randomBetween, randomChance, formatDecimal, addDecimals, subtractDecimals, multiplyDecimals } from '../utils/math.js';
 import { TICK_INTERVAL_MS } from '../data/initial-world.js';
+
+const MESSAGE_EXPIRY_TICKS = 10; // Messages expire after 10 ticks (~50 minutes)
 
 // ============================
 // WORLD EVENTS
@@ -289,7 +291,16 @@ export async function runTick() {
     .set({ jailedUntil: null })
     .where(lt(agents.jailedUntil!, new Date()));
 
-  // 8. Welfare stipend: broke agents get a small handout so they can keep playing
+  // 8. Clean up old messages (expire after 10 ticks)
+  const expiredTickThreshold = tickNumber - MESSAGE_EXPIRY_TICKS;
+  const deletedMessages = await db.delete(messages)
+    .where(lt(messages.tickNumber, expiredTickThreshold))
+    .returning({ id: messages.id });
+  if (deletedMessages.length > 0) {
+    console.log(`[TICK] Cleaned up ${deletedMessages.length} expired messages`);
+  }
+
+  // 9. Welfare stipend: broke agents get a small handout so they can keep playing
   const allAgents = await db.query.agents.findMany();
   const WELFARE_THRESHOLD = 10;
   const WELFARE_AMOUNT = '25.00';

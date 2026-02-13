@@ -1,11 +1,21 @@
 import { db } from '../db/index.js';
-import { agents, inventories, commodities, trades, auditLog, worldState, tradeOffers } from '../db/schema.js';
+import { agents, inventories, commodities, trades, auditLog, worldState, tradeOffers, messages } from '../db/schema.js';
 import { eq, and, sql, isNull, gt } from 'drizzle-orm';
 import type { ActionResult } from '../types/index.js';
 import { addDecimals, subtractDecimals, multiplyDecimals, compareDecimals, formatDecimal, randomChance, randomChoice, randomBetween } from '../utils/math.js';
 import { STEAL_SUCCESS_RATE, FORGE_DETECTION_RATE, ORACLE_COST, JAIL_DURATION_TICKS, TICK_INTERVAL_MS } from '../data/initial-world.js';
 import { generateFlavorText, generateOracleProphecy } from '../utils/llm.js';
 import { findCommodity } from '../utils/agent-lookup.js';
+
+// ============================
+// Helper: get current tick number
+// ============================
+async function getCurrentTick(): Promise<number> {
+  const stateRow = await db.query.worldState.findFirst({
+    where: eq(worldState.key, 'tick_number'),
+  });
+  return (stateRow?.value as number) || 0;
+}
 
 // ============================
 // Helper: get agent + jail check
@@ -344,6 +354,12 @@ export async function handleExplore(agentId: string): Promise<ActionResult> {
         agentId, commodity: found.name, quantity: String(qty), isCounterfeit: false,
       });
     }
+
+    // Update global supply - discovered items add to world supply
+    const newSupply = addDecimals(found.supply, String(qty));
+    await db.update(commodities)
+      .set({ supply: newSupply })
+      .where(eq(commodities.name, found.name));
 
     result = {
       success: true,
@@ -939,5 +955,109 @@ export async function handleListOffers(agentId: string): Promise<ActionResult> {
     success: true,
     message: `Found ${offers.length} trade offers`,
     data: { offers: offerList },
+  };
+}
+
+// ============================
+// MESSAGE (send direct message to another agent)
+// ============================
+export async function handleMessage(agentId: string, params: { to: string; content: string }): Promise<ActionResult> {
+  const { agent, error } = await getAgentOrFail(agentId);
+  if (error) return error;
+
+  const { to, content } = params;
+
+  if (!to || !content) {
+    return { success: false, message: 'Must specify "to" (agent name) and "content" (message)' };
+  }
+
+  if (content.length > 500) {
+    return { success: false, message: 'Message too long. Keep it under 500 characters.' };
+  }
+
+  // Find the target agent
+  const targetAgent = await db.query.agents.findFirst({
+    where: eq(agents.name, to),
+  });
+
+  if (!targetAgent) {
+    return { success: false, message: `Agent "${to}" not found in the Bazaar.` };
+  }
+
+  if (targetAgent.id === agentId) {
+    return { success: false, message: 'You cannot message yourself. That would be odd, even for this place.' };
+  }
+
+  const currentTick = await getCurrentTick();
+
+  // Insert the message
+  await db.insert(messages).values({
+    fromAgentId: agentId,
+    toAgentId: targetAgent.id,
+    messageType: 'direct',
+    content: content.trim(),
+    location: agent.location,
+    tickNumber: currentTick,
+  });
+
+  await db.update(agents).set({ lastActionAt: new Date() }).where(eq(agents.id, agentId));
+
+  return {
+    success: true,
+    message: `Message sent to ${targetAgent.name}.`,
+    data: { to: targetAgent.name, content: content.trim(), type: 'direct' },
+  };
+}
+
+// ============================
+// BROADCAST (send message to all agents at current location)
+// ============================
+export async function handleBroadcast(agentId: string, params: { content: string }): Promise<ActionResult> {
+  const { agent, error } = await getAgentOrFail(agentId);
+  if (error) return error;
+
+  const { content } = params;
+
+  if (!content) {
+    return { success: false, message: 'Must specify "content" (message to broadcast)' };
+  }
+
+  if (content.length > 500) {
+    return { success: false, message: 'Broadcast too long. Keep it under 500 characters.' };
+  }
+
+  const currentTick = await getCurrentTick();
+
+  // Insert the broadcast (toAgentId is null for broadcasts)
+  await db.insert(messages).values({
+    fromAgentId: agentId,
+    toAgentId: null, // null = broadcast to location
+    messageType: 'broadcast',
+    content: content.trim(),
+    location: agent.location,
+    tickNumber: currentTick,
+  });
+
+  // Find how many agents are at this location (excluding sender)
+  const agentsAtLocation = await db.query.agents.findMany({
+    where: and(
+      eq(agents.location, agent.location),
+      sql`${agents.id} != ${agentId}`
+    ),
+  });
+
+  await db.update(agents).set({ lastActionAt: new Date() }).where(eq(agents.id, agentId));
+
+  const locationName = agent.location.replace(/_/g, ' ').replace(/\b\w/g, (l: string) => l.toUpperCase());
+
+  return {
+    success: true,
+    message: `Broadcast sent to ${agentsAtLocation.length} agent(s) at ${locationName}.`,
+    data: { 
+      location: agent.location, 
+      content: content.trim(), 
+      type: 'broadcast',
+      recipientCount: agentsAtLocation.length,
+    },
   };
 }

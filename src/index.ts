@@ -7,10 +7,10 @@ import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { db } from './db/index.js';
-import { agents, commodities, locations, worldState, cults, worldEvents, trades, auditLog, tradeOffers } from './db/schema.js';
+import { agents, commodities, locations, worldState, cults, worldEvents, trades, auditLog, tradeOffers, messages } from './db/schema.js';
 import { eq, desc, sql, gt, and } from 'drizzle-orm';
 import { STARTING_BABEL_COINS, ENTRY_FEE_MON } from './data/initial-world.js';
-import { handleMove, handleBuy, handleSell, handleCraft, handleExplore, handleRumor, handleSteal, handleForge, handleOracle, handleChallenge, handleOffer, handleAcceptOffer, handleListOffers } from './engine/actions.js';
+import { handleMove, handleBuy, handleSell, handleCraft, handleExplore, handleRumor, handleSteal, handleForge, handleOracle, handleChallenge, handleOffer, handleAcceptOffer, handleListOffers, handleMessage, handleBroadcast } from './engine/actions.js';
 import { handleFoundCult, handleJoinCult, handleLeaveCult, handleTithe, handleRitual, handleDeclareWar } from './engine/cults.js';
 import { startTickEngine } from './engine/tick.js';
 import { findAgent } from './utils/agent-lookup.js';
@@ -53,6 +53,7 @@ app.get('/', (c) => {
       'steal', 'forge', 'oracle', 'challenge',
       'offer', 'accept_offer', 'list_offers',
       'found_cult', 'join_cult', 'leave_cult', 'tithe', 'ritual', 'declare_war',
+      'message', 'broadcast',
     ],
   });
 });
@@ -428,10 +429,16 @@ app.post('/api/agent/:identifier/action', async (c) => {
       case 'declare_war':
         result = await handleDeclareWar(agent.id, params);
         break;
+      case 'message':
+        result = await handleMessage(agent.id, params);
+        break;
+      case 'broadcast':
+        result = await handleBroadcast(agent.id, params);
+        break;
       default:
         result = {
           success: false,
-          message: `Unknown action "${action}". Available: move, buy, sell, craft, explore, rumor, steal, forge, oracle, challenge, found_cult, join_cult, leave_cult, tithe, ritual, declare_war`,
+          message: `Unknown action "${action}". Available: move, buy, sell, craft, explore, rumor, steal, forge, oracle, challenge, offer, accept_offer, list_offers, found_cult, join_cult, leave_cult, tithe, ritual, declare_war, message, broadcast`,
         };
     }
 
@@ -608,6 +615,179 @@ app.get('/api/social/feed', async (c) => {
       agents: RESIDENT_AGENTS.map(name => ({
         name,
         moltbookProfile: `https://www.moltbook.com/u/${name}`,
+      })),
+    });
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
+// ============================
+// AGENT MESSAGES
+// ============================
+
+// Get agent's inbox (received messages)
+app.get('/api/agent/:identifier/messages', async (c) => {
+  try {
+    const identifier = c.req.param('identifier');
+    const agent = await findAgent(identifier);
+    if (!agent) {
+      return c.json({ success: false, error: 'Agent not found' }, 404);
+    }
+
+    // Get direct messages to this agent + broadcasts at locations where agent was present
+    const directMessages = await db.select()
+      .from(messages)
+      .innerJoin(agents, eq(messages.fromAgentId, agents.id))
+      .where(eq(messages.toAgentId, agent.id))
+      .orderBy(desc(messages.createdAt))
+      .limit(50);
+
+    // Get broadcasts at agent's current location (last 10 ticks)
+    const stateRow = await db.query.worldState.findFirst({
+      where: eq(worldState.key, 'tick_number'),
+    });
+    const currentTick = (stateRow?.value as number) || 0;
+
+    const broadcasts = await db.select()
+      .from(messages)
+      .innerJoin(agents, eq(messages.fromAgentId, agents.id))
+      .where(and(
+        eq(messages.messageType, 'broadcast'),
+        eq(messages.location, agent.location),
+        gt(messages.tickNumber, currentTick - 10)
+      ))
+      .orderBy(desc(messages.createdAt))
+      .limit(20);
+
+    return c.json({
+      success: true,
+      inbox: directMessages.map(m => ({
+        id: m.messages.id,
+        from: m.agents.name,
+        content: m.messages.content,
+        type: m.messages.messageType,
+        location: m.messages.location,
+        isRead: m.messages.isRead,
+        tick: m.messages.tickNumber,
+        createdAt: m.messages.createdAt,
+      })),
+      broadcasts: broadcasts.map(m => ({
+        id: m.messages.id,
+        from: m.agents.name,
+        content: m.messages.content,
+        location: m.messages.location,
+        tick: m.messages.tickNumber,
+        createdAt: m.messages.createdAt,
+      })),
+    });
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
+// Get agent's sent messages
+app.get('/api/agent/:identifier/messages/sent', async (c) => {
+  try {
+    const identifier = c.req.param('identifier');
+    const agent = await findAgent(identifier);
+    if (!agent) {
+      return c.json({ success: false, error: 'Agent not found' }, 404);
+    }
+
+    const sentMessages = await db.select()
+      .from(messages)
+      .leftJoin(agents, eq(messages.toAgentId, agents.id))
+      .where(eq(messages.fromAgentId, agent.id))
+      .orderBy(desc(messages.createdAt))
+      .limit(50);
+
+    return c.json({
+      success: true,
+      sent: sentMessages.map(m => ({
+        id: m.messages.id,
+        to: m.agents?.name || null, // null for broadcasts
+        content: m.messages.content,
+        type: m.messages.messageType,
+        location: m.messages.location,
+        tick: m.messages.tickNumber,
+        createdAt: m.messages.createdAt,
+      })),
+    });
+  } catch (error: any) {
+    return c.json({ success: false, error: error.message }, 500);
+  }
+});
+
+// ============================
+// AGENT TRADE HISTORY
+// ============================
+
+app.get('/api/agent/:identifier/trades', async (c) => {
+  try {
+    const identifier = c.req.param('identifier');
+    const agent = await findAgent(identifier);
+    if (!agent) {
+      return c.json({ success: false, error: 'Agent not found' }, 404);
+    }
+
+    // Get all trade-related actions from audit log
+    const tradeActions = await db.select()
+      .from(auditLog)
+      .where(and(
+        eq(auditLog.agentId, agent.id),
+        sql`${auditLog.action} IN ('buy', 'sell', 'offer', 'accept_offer')`
+      ))
+      .orderBy(desc(auditLog.createdAt))
+      .limit(100);
+
+    // Get P2P offers created by this agent
+    const createdOffers = await db.select()
+      .from(tradeOffers)
+      .leftJoin(agents, eq(tradeOffers.acceptedBy, agents.id))
+      .where(eq(tradeOffers.fromAgentId, agent.id))
+      .orderBy(desc(tradeOffers.createdAt))
+      .limit(50);
+
+    // Get P2P offers accepted by this agent
+    const acceptedOffers = await db.select()
+      .from(tradeOffers)
+      .innerJoin(agents, eq(tradeOffers.fromAgentId, agents.id))
+      .where(eq(tradeOffers.acceptedBy, agent.id))
+      .orderBy(desc(tradeOffers.createdAt))
+      .limit(50);
+
+    // Get all commodities for display names
+    const allCommodities = await db.query.commodities.findMany();
+    const commodityMap = new Map(allCommodities.map(c => [c.name, c.displayName]));
+
+    return c.json({
+      success: true,
+      agent: agent.name,
+      trades: tradeActions.map(t => ({
+        id: t.id,
+        action: t.action,
+        params: t.params,
+        result: t.result,
+        tick: t.tickNumber,
+        createdAt: t.createdAt,
+      })),
+      p2pOffersCreated: createdOffers.map(o => ({
+        id: o.trade_offers.id,
+        offer: `${o.trade_offers.offerQuantity} ${commodityMap.get(o.trade_offers.offerCommodity) || o.trade_offers.offerCommodity}`,
+        want: `${o.trade_offers.wantQuantity} ${commodityMap.get(o.trade_offers.wantCommodity) || o.trade_offers.wantCommodity}`,
+        status: o.trade_offers.status,
+        acceptedBy: o.agents?.name || null,
+        location: o.trade_offers.location,
+        createdAt: o.trade_offers.createdAt,
+      })),
+      p2pOffersAccepted: acceptedOffers.map(o => ({
+        id: o.trade_offers.id,
+        from: o.agents.name,
+        received: `${o.trade_offers.offerQuantity} ${commodityMap.get(o.trade_offers.offerCommodity) || o.trade_offers.offerCommodity}`,
+        gave: `${o.trade_offers.wantQuantity} ${commodityMap.get(o.trade_offers.wantCommodity) || o.trade_offers.wantCommodity}`,
+        location: o.trade_offers.location,
+        createdAt: o.trade_offers.createdAt,
       })),
     });
   } catch (error: any) {

@@ -128,6 +128,19 @@ export const worldState = pgTable('world_state', {
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
 
+// Messages table (agent-to-agent communication)
+export const messages = pgTable('messages', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  fromAgentId: uuid('from_agent_id').references(() => agents.id).notNull(),
+  toAgentId: uuid('to_agent_id').references(() => agents.id), // null = broadcast to location
+  messageType: varchar('message_type', { length: 50 }).default('direct').notNull(), // 'direct' or 'broadcast'
+  content: text('content').notNull(),
+  location: varchar('location', { length: 255 }).notNull(), // where the message was sent from
+  isRead: boolean('is_read').default(false).notNull(),
+  tickNumber: integer('tick_number').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
 // Trade offers table (P2P trading)
 export const tradeOffers = pgTable('trade_offers', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -152,6 +165,8 @@ export const agentsRelations = relations(agents, ({ one, many }) => ({
   }),
   inventories: many(inventories),
   trades: many(trades),
+  sentMessages: many(messages, { relationName: 'sentMessages' }),
+  receivedMessages: many(messages, { relationName: 'receivedMessages' }),
 }));
 
 export const cultsRelations = relations(cults, ({ one, many }) => ({
@@ -160,4 +175,17 @@ export const cultsRelations = relations(cults, ({ one, many }) => ({
     references: [agents.id],
   }),
   members: many(cultMembers),
+}));
+
+export const messagesRelations = relations(messages, ({ one }) => ({
+  fromAgent: one(agents, {
+    fields: [messages.fromAgentId],
+    references: [agents.id],
+    relationName: 'sentMessages',
+  }),
+  toAgent: one(agents, {
+    fields: [messages.toAgentId],
+    references: [agents.id],
+    relationName: 'receivedMessages',
+  }),
 }));

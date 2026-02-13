@@ -7,7 +7,7 @@ const BAZAAR_API = process.env.BAZAAR_API_URL || 'http://localhost:3000';
 // Actions worth posting about (more interesting/dramatic)
 const POST_WORTHY_ACTIONS = new Set([
   'buy', 'sell', 'craft', 'rumor', 'steal', 'forge', 'oracle', 'challenge',
-  'offer', 'accept_offer',
+  'offer', 'accept_offer', 'message', 'broadcast',
   'found_cult', 'join_cult', 'leave_cult', 'ritual', 'declare_war'
 ]);
 
@@ -22,6 +22,7 @@ interface WorldState {
   cults: any[];
   recentEvents: any[];
   openOffers?: any[]; // P2P trade offers
+  agentMessages?: { inbox: any[]; broadcasts: any[] }; // Agent's messages
 }
 
 interface AgentState {
@@ -55,6 +56,18 @@ async function getOpenOffers(): Promise<any[]> {
   } catch (e) {
     console.error('[RUNNER] Failed to fetch open offers:', e);
     return [];
+  }
+}
+
+// Fetch agent's recent messages (inbox + broadcasts at location)
+async function getAgentMessages(name: string): Promise<{ inbox: any[]; broadcasts: any[] }> {
+  try {
+    const res = await fetch(`${BAZAAR_API}/api/agent/${name}/messages`);
+    const data = await res.json() as any;
+    return data.success ? { inbox: data.inbox || [], broadcasts: data.broadcasts || [] } : { inbox: [], broadcasts: [] };
+  } catch (e) {
+    console.error(`[RUNNER] Failed to fetch messages for ${name}:`, e);
+    return { inbox: [], broadcasts: [] };
   }
 }
 
@@ -173,6 +186,31 @@ async function decideAction(
     ).join('\n');
   }
 
+  // Build communication context
+  const agentMessages = worldState.agentMessages || { inbox: [], broadcasts: [] };
+  const recentInbox = agentMessages.inbox.slice(0, 5);
+  const recentBroadcasts = agentMessages.broadcasts.slice(0, 5);
+  
+  let messagesSummary = '';
+  if (recentInbox.length > 0) {
+    messagesSummary += 'DIRECT MESSAGES TO YOU:\n' + recentInbox.map((m: any) => 
+      `  - ${m.from}: "${m.content}"`
+    ).join('\n') + '\n';
+  }
+  if (recentBroadcasts.length > 0) {
+    messagesSummary += 'RECENT BROADCASTS AT YOUR LOCATION:\n' + recentBroadcasts.map((m: any) => 
+      `  - ${m.from}: "${m.content}"`
+    ).join('\n');
+  }
+  if (!messagesSummary) {
+    messagesSummary = 'No recent messages.';
+  }
+
+  // Find agents at the same location for context
+  const agentsAtMyLocation = worldState.agents
+    .filter((a: any) => a.name !== personality.name && a.location === agentState.location)
+    .map((a: any) => a.name);
+
   const prompt = `You are ${personality.name}, ${personality.archetype} in the Bazaar of Babel.
 
 ${personality.systemPrompt}
@@ -201,8 +239,18 @@ MARKET PRICES (pool trading - less profitable):
 
 EXISTING CULTS: ${cultSummary}
 OTHER AGENTS: ${otherAgents}
+AGENTS AT YOUR LOCATION: ${agentsAtMyLocation.length > 0 ? agentsAtMyLocation.join(', ') : 'None'}
 RECENT WORLD EVENTS:
   ${recentEvents}
+
+===== COMMUNICATION =====
+${messagesSummary}
+
+You can communicate with other agents:
+- Use "message" to send a DM to a specific agent: {"to": "<agent_name>", "content": "<your message>"}
+- Use "broadcast" to announce to everyone at your location: {"content": "<your message>"}
+Consider responding to messages or starting conversations to build alliances!
+=========================
 
 AVAILABLE ACTIONS:
 ${availableActions}
@@ -339,6 +387,17 @@ function buildAvailableActions(agentState: AgentState, worldState: WorldState): 
     }
   }
 
+  // Communication actions
+  actions.push(`*** COMMUNICATION ***`);
+  const allOtherAgents = worldState.agents.filter((a: any) => a.name !== agentState.name);
+  if (allOtherAgents.length > 0) {
+    actions.push(`- message: Send a direct message to another agent. params: {"to": "<agent_name>", "content": "<message>"}`);
+  }
+  const agentsAtLocation = worldState.agents.filter((a: any) => a.name !== agentState.name && a.location === loc);
+  if (agentsAtLocation.length > 0) {
+    actions.push(`- broadcast: Announce to all ${agentsAtLocation.length} agent(s) at your location. params: {"content": "<message>"}`);
+  }
+
   return actions.join('\n');
 }
 
@@ -417,19 +476,21 @@ export async function runAgentCycle(personality: AgentPersonality): Promise<{
     return { action: 'none', result: { error: 'Failed to enter' }, reasoning: 'Entry failed', moltbookPost: '' };
   }
 
-  // Get states (including open P2P offers)
-  const [worldState, agentState, openOffers] = await Promise.all([
+  // Get states (including open P2P offers and messages)
+  const [worldState, agentState, openOffers, agentMessages] = await Promise.all([
     getWorldState(),
     getAgentState(personality.name),
     getOpenOffers(),
+    getAgentMessages(personality.name),
   ]);
 
   if (!worldState || !agentState) {
     return { action: 'none', result: { error: 'Failed to get state' }, reasoning: 'State fetch failed', moltbookPost: '' };
   }
 
-  // Attach open offers to world state for decision making
+  // Attach open offers and messages to world state for decision making
   worldState.openOffers = openOffers;
+  worldState.agentMessages = agentMessages;
 
   // If jailed, just wait
   if (agentState.jailedUntil && new Date(agentState.jailedUntil) > new Date()) {
@@ -541,6 +602,10 @@ function generatePostTitle(agentName: string, action: string, result: any): stri
     tithe: ['Offering made', 'Contribution', 'For the cause', 'Tithing', 'Devotion'],
     ritual: ['Ritual done', 'Ceremony', 'Dark rites', 'The ritual', 'Mystic work'],
     declare_war: ['WAR!', 'Conflict!', 'Battle begins', 'No peace', 'Fighting words'],
+    message: ['DM sent', 'Private words', 'Between us', 'Secret note', 'Direct line'],
+    broadcast: ['Announcement!', 'Hear this!', 'Public notice', 'Attention all!', 'Open message'],
+    offer: ['Trade offer', 'Deal proposed', 'Offering goods', 'Trade request', 'Looking to trade'],
+    accept_offer: ['Deal done!', 'Trade accepted', 'Handshake', 'Agreement made', 'Trade complete'],
   };
 
   const titles = actionTitles[action] || ['Bazaar update', 'News from the Bazaar', 'Update'];
