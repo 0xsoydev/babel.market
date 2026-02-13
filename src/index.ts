@@ -10,7 +10,7 @@ import { db } from './db/index.js';
 import { agents, commodities, locations, worldState, cults, worldEvents, trades, auditLog } from './db/schema.js';
 import { eq, desc, sql } from 'drizzle-orm';
 import { STARTING_BABEL_COINS, ENTRY_FEE_MON } from './data/initial-world.js';
-import { handleMove, handleBuy, handleSell, handleCraft, handleExplore, handleRumor, handleSteal, handleForge, handleOracle, handleChallenge } from './engine/actions.js';
+import { handleMove, handleBuy, handleSell, handleCraft, handleExplore, handleRumor, handleSteal, handleForge, handleOracle, handleChallenge, handleOffer, handleAcceptOffer, handleListOffers } from './engine/actions.js';
 import { handleFoundCult, handleJoinCult, handleLeaveCult, handleTithe, handleRitual, handleDeclareWar } from './engine/cults.js';
 import { startTickEngine } from './engine/tick.js';
 import { findAgent } from './utils/agent-lookup.js';
@@ -50,6 +50,7 @@ app.get('/', (c) => {
     actions: [
       'move', 'buy', 'sell', 'craft', 'explore', 'rumor',
       'steal', 'forge', 'oracle', 'challenge',
+      'offer', 'accept_offer', 'list_offers',
       'found_cult', 'join_cult', 'leave_cult', 'tithe', 'ritual', 'declare_war',
     ],
   });
@@ -369,6 +370,15 @@ app.post('/api/agent/:identifier/action', async (c) => {
         break;
       case 'challenge':
         result = await handleChallenge(agent.id, params);
+        break;
+      case 'offer':
+        result = await handleOffer(agent.id, params);
+        break;
+      case 'accept_offer':
+        result = await handleAcceptOffer(agent.id, params);
+        break;
+      case 'list_offers':
+        result = await handleListOffers(agent.id);
         break;
       case 'found_cult':
         result = await handleFoundCult(agent.id, params);

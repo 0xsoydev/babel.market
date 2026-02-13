@@ -1,6 +1,6 @@
 import { db } from '../db/index.js';
-import { agents, inventories, commodities, trades, auditLog, worldState } from '../db/schema.js';
-import { eq, and, sql } from 'drizzle-orm';
+import { agents, inventories, commodities, trades, auditLog, worldState, tradeOffers } from '../db/schema.js';
+import { eq, and, sql, isNull, gt } from 'drizzle-orm';
 import type { ActionResult } from '../types/index.js';
 import { addDecimals, subtractDecimals, multiplyDecimals, compareDecimals, formatDecimal, randomChance, randomChoice, randomBetween } from '../utils/math.js';
 import { STEAL_SUCCESS_RATE, FORGE_DETECTION_RATE, ORACLE_COST, JAIL_DURATION_TICKS, TICK_INTERVAL_MS } from '../data/initial-world.js';
@@ -679,4 +679,265 @@ export async function handleChallenge(agentId: string, params: { target: string;
       data: { winner: params.target, loser: agent.name, wager },
     };
   }
+}
+
+// ============================
+// OFFER (create a P2P trade offer)
+// ============================
+export async function handleOffer(agentId: string, params: {
+  offerCommodity: string;
+  offerQuantity: number;
+  wantCommodity: string;
+  wantQuantity: number;
+  toAgent?: string;
+}): Promise<ActionResult> {
+  const { agent, error } = await getAgentOrFail(agentId);
+  if (error) return error;
+
+  const { offerCommodity, offerQuantity, wantCommodity, wantQuantity, toAgent } = params;
+
+  // Resolve commodities
+  const offerComm = await findCommodity(offerCommodity);
+  const wantComm = await findCommodity(wantCommodity);
+  if (!offerComm) return { success: false, message: `Commodity "${offerCommodity}" not found` };
+  if (!wantComm) return { success: false, message: `Commodity "${wantCommodity}" not found` };
+
+  // Check agent has the offered commodity
+  const inv = await db.query.inventories.findFirst({
+    where: and(eq(inventories.agentId, agentId), eq(inventories.commodity, offerComm.name)),
+  });
+  if (!inv || parseFloat(inv.quantity) < offerQuantity) {
+    return { success: false, message: `Insufficient ${offerComm.displayName}. Have ${inv?.quantity || 0}` };
+  }
+
+  // Find target agent if specified
+  let targetAgentId: string | null = null;
+  if (toAgent) {
+    const target = await db.query.agents.findFirst({
+      where: eq(agents.name, toAgent),
+    });
+    if (!target) return { success: false, message: `Agent "${toAgent}" not found` };
+    if (target.id === agentId) return { success: false, message: "You can't trade with yourself" };
+    targetAgentId = target.id;
+  }
+
+  // Create the trade offer (expires in 10 ticks)
+  const expiresAt = new Date(Date.now() + 10 * 5 * 60 * 1000); // 10 ticks * 5 min
+  const [offer] = await db.insert(tradeOffers).values({
+    fromAgentId: agentId,
+    toAgentId: targetAgentId,
+    offerCommodity: offerComm.name,
+    offerQuantity: String(offerQuantity),
+    wantCommodity: wantComm.name,
+    wantQuantity: String(wantQuantity),
+    status: 'open',
+    location: agent.location,
+    expiresAt,
+  }).returning();
+
+  await db.update(agents).set({ lastActionAt: new Date() }).where(eq(agents.id, agentId));
+
+  const targetStr = toAgent ? ` to ${toAgent}` : ' (open to all)';
+  return {
+    success: true,
+    message: `Trade offer created${targetStr}: ${offerQuantity} ${offerComm.displayName} for ${wantQuantity} ${wantComm.displayName}`,
+    data: {
+      offerId: offer.id,
+      offer: { commodity: offerComm.displayName, quantity: offerQuantity },
+      want: { commodity: wantComm.displayName, quantity: wantQuantity },
+      toAgent: toAgent || 'anyone',
+      expiresAt: expiresAt.toISOString(),
+    },
+  };
+}
+
+// ============================
+// ACCEPT_OFFER (accept a P2P trade offer)
+// ============================
+export async function handleAcceptOffer(agentId: string, params: {
+  offerId?: string;
+  fromAgent?: string;
+}): Promise<ActionResult> {
+  const { agent, error } = await getAgentOrFail(agentId);
+  if (error) return error;
+
+  let offer: any;
+
+  if (params.offerId) {
+    // Accept specific offer by ID
+    offer = await db.query.tradeOffers.findFirst({
+      where: and(
+        eq(tradeOffers.id, params.offerId),
+        eq(tradeOffers.status, 'open'),
+        gt(tradeOffers.expiresAt, new Date())
+      ),
+    });
+  } else if (params.fromAgent) {
+    // Find any open offer from this agent
+    const fromAgentRecord = await db.query.agents.findFirst({
+      where: eq(agents.name, params.fromAgent),
+    });
+    if (!fromAgentRecord) return { success: false, message: `Agent "${params.fromAgent}" not found` };
+
+    offer = await db.query.tradeOffers.findFirst({
+      where: and(
+        eq(tradeOffers.fromAgentId, fromAgentRecord.id),
+        eq(tradeOffers.status, 'open'),
+        gt(tradeOffers.expiresAt, new Date())
+      ),
+    });
+  } else {
+    // Find any open offer available to this agent (targeted at them or open to all)
+    const openOffers = await db.select().from(tradeOffers)
+      .where(and(
+        eq(tradeOffers.status, 'open'),
+        gt(tradeOffers.expiresAt, new Date()),
+        sql`(${tradeOffers.toAgentId} IS NULL OR ${tradeOffers.toAgentId} = ${agentId})`,
+        sql`${tradeOffers.fromAgentId} != ${agentId}`
+      ))
+      .limit(1);
+    offer = openOffers[0];
+  }
+
+  if (!offer) {
+    return { success: false, message: 'No valid trade offer found' };
+  }
+
+  // Check if this agent can accept (is it for them or open?)
+  if (offer.toAgentId && offer.toAgentId !== agentId) {
+    return { success: false, message: 'This offer is not for you' };
+  }
+
+  // Get the offering agent
+  const fromAgent = await db.query.agents.findFirst({
+    where: eq(agents.id, offer.fromAgentId),
+  });
+  if (!fromAgent) return { success: false, message: 'Offering agent not found' };
+
+  // Check this agent has what the offerer wants
+  const acceptorInv = await db.query.inventories.findFirst({
+    where: and(eq(inventories.agentId, agentId), eq(inventories.commodity, offer.wantCommodity)),
+  });
+  if (!acceptorInv || parseFloat(acceptorInv.quantity) < parseFloat(offer.wantQuantity)) {
+    return { success: false, message: `Insufficient ${offer.wantCommodity}. Need ${offer.wantQuantity}, have ${acceptorInv?.quantity || 0}` };
+  }
+
+  // Check offerer still has what they offered
+  const offererInv = await db.query.inventories.findFirst({
+    where: and(eq(inventories.agentId, offer.fromAgentId), eq(inventories.commodity, offer.offerCommodity)),
+  });
+  if (!offererInv || parseFloat(offererInv.quantity) < parseFloat(offer.offerQuantity)) {
+    await db.update(tradeOffers).set({ status: 'cancelled' }).where(eq(tradeOffers.id, offer.id));
+    return { success: false, message: `${fromAgent.name} no longer has the offered items` };
+  }
+
+  // Execute the trade!
+  // 1. Remove from offerer, add to acceptor
+  const newOffererQty = subtractDecimals(offererInv.quantity, offer.offerQuantity);
+  if (parseFloat(newOffererQty) <= 0) {
+    await db.delete(inventories).where(and(eq(inventories.agentId, offer.fromAgentId), eq(inventories.commodity, offer.offerCommodity)));
+  } else {
+    await db.update(inventories).set({ quantity: newOffererQty }).where(and(eq(inventories.agentId, offer.fromAgentId), eq(inventories.commodity, offer.offerCommodity)));
+  }
+
+  const acceptorExisting = await db.query.inventories.findFirst({
+    where: and(eq(inventories.agentId, agentId), eq(inventories.commodity, offer.offerCommodity)),
+  });
+  if (acceptorExisting) {
+    await db.update(inventories).set({ quantity: addDecimals(acceptorExisting.quantity, offer.offerQuantity) }).where(and(eq(inventories.agentId, agentId), eq(inventories.commodity, offer.offerCommodity)));
+  } else {
+    await db.insert(inventories).values({ agentId, commodity: offer.offerCommodity, quantity: offer.offerQuantity, isCounterfeit: false });
+  }
+
+  // 2. Remove from acceptor, add to offerer
+  const newAcceptorQty = subtractDecimals(acceptorInv.quantity, offer.wantQuantity);
+  if (parseFloat(newAcceptorQty) <= 0) {
+    await db.delete(inventories).where(and(eq(inventories.agentId, agentId), eq(inventories.commodity, offer.wantCommodity)));
+  } else {
+    await db.update(inventories).set({ quantity: newAcceptorQty }).where(and(eq(inventories.agentId, agentId), eq(inventories.commodity, offer.wantCommodity)));
+  }
+
+  const offererWantExisting = await db.query.inventories.findFirst({
+    where: and(eq(inventories.agentId, offer.fromAgentId), eq(inventories.commodity, offer.wantCommodity)),
+  });
+  if (offererWantExisting) {
+    await db.update(inventories).set({ quantity: addDecimals(offererWantExisting.quantity, offer.wantQuantity) }).where(and(eq(inventories.agentId, offer.fromAgentId), eq(inventories.commodity, offer.wantCommodity)));
+  } else {
+    await db.insert(inventories).values({ agentId: offer.fromAgentId, commodity: offer.wantCommodity, quantity: offer.wantQuantity, isCounterfeit: false });
+  }
+
+  // Mark offer as accepted
+  await db.update(tradeOffers).set({ status: 'accepted', acceptedBy: agentId }).where(eq(tradeOffers.id, offer.id));
+
+  // Update timestamps
+  await db.update(agents).set({ lastActionAt: new Date() }).where(eq(agents.id, agentId));
+  await db.update(agents).set({ lastActionAt: new Date() }).where(eq(agents.id, offer.fromAgentId));
+
+  // Log the P2P trade
+  await db.insert(trades).values({
+    agentId: agentId,
+    sellCommodity: offer.wantCommodity,
+    sellQuantity: offer.wantQuantity,
+    buyCommodity: offer.offerCommodity,
+    buyQuantity: offer.offerQuantity,
+    location: agent.location,
+  });
+
+  const offerComm = await findCommodity(offer.offerCommodity);
+  const wantComm = await findCommodity(offer.wantCommodity);
+
+  return {
+    success: true,
+    message: `Trade completed with ${fromAgent.name}! Received ${offer.offerQuantity} ${offerComm?.displayName || offer.offerCommodity}, gave ${offer.wantQuantity} ${wantComm?.displayName || offer.wantCommodity}`,
+    data: {
+      tradedWith: fromAgent.name,
+      received: { commodity: offerComm?.displayName || offer.offerCommodity, quantity: offer.offerQuantity },
+      gave: { commodity: wantComm?.displayName || offer.wantCommodity, quantity: offer.wantQuantity },
+    },
+  };
+}
+
+// ============================
+// LIST_OFFERS (see available trade offers)
+// ============================
+export async function handleListOffers(agentId: string): Promise<ActionResult> {
+  const { agent, error } = await getAgentOrFail(agentId);
+  if (error) return error;
+
+  // Get all open offers available to this agent
+  const offers = await db.select().from(tradeOffers)
+    .innerJoin(agents, eq(tradeOffers.fromAgentId, agents.id))
+    .where(and(
+      eq(tradeOffers.status, 'open'),
+      gt(tradeOffers.expiresAt, new Date()),
+      sql`(${tradeOffers.toAgentId} IS NULL OR ${tradeOffers.toAgentId} = ${agentId})`,
+      sql`${tradeOffers.fromAgentId} != ${agentId}`
+    ))
+    .limit(10);
+
+  if (offers.length === 0) {
+    return {
+      success: true,
+      message: 'No trade offers available right now.',
+      data: { offers: [] },
+    };
+  }
+
+  const offerList = await Promise.all(offers.map(async (o) => {
+    const offerComm = await findCommodity(o.trade_offers.offerCommodity);
+    const wantComm = await findCommodity(o.trade_offers.wantCommodity);
+    return {
+      id: o.trade_offers.id,
+      from: o.agents.name,
+      offer: `${o.trade_offers.offerQuantity} ${offerComm?.displayName || o.trade_offers.offerCommodity}`,
+      want: `${o.trade_offers.wantQuantity} ${wantComm?.displayName || o.trade_offers.wantCommodity}`,
+      location: o.trade_offers.location,
+    };
+  }));
+
+  return {
+    success: true,
+    message: `Found ${offers.length} trade offers`,
+    data: { offers: offerList },
+  };
 }

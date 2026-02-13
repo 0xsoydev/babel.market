@@ -7,11 +7,12 @@ const BAZAAR_API = process.env.BAZAAR_API_URL || 'http://localhost:3000';
 // Actions worth posting about (more interesting/dramatic)
 const POST_WORTHY_ACTIONS = new Set([
   'buy', 'sell', 'craft', 'rumor', 'steal', 'forge', 'oracle', 'challenge',
+  'offer', 'accept_offer',
   'found_cult', 'join_cult', 'leave_cult', 'ritual', 'declare_war'
 ]);
 
 // Actions that are routine (only post sometimes)
-const ROUTINE_ACTIONS = new Set(['move', 'explore', 'tithe']);
+const ROUTINE_ACTIONS = new Set(['move', 'explore', 'tithe', 'list_offers']);
 
 interface WorldState {
   tickNumber: number;
@@ -259,6 +260,13 @@ function buildAvailableActions(agentState: AgentState, worldState: WorldState): 
   if (otherAgents.length > 0 && coins >= 10) {
     actions.push(`- challenge: Challenge another agent to a trade duel. params: {"target": "<agent_name>", "wager": <amount>}`);
   }
+
+  // P2P Trading (offer/accept trades with other agents)
+  if (agentState.inventory.length > 0) {
+    actions.push(`- offer: Create a trade offer for another agent. params: {"offerCommodity": "<name>", "offerQuantity": <n>, "wantCommodity": "<name>", "wantQuantity": <n>, "toAgent": "<optional agent name>"}`);
+  }
+  actions.push(`- accept_offer: Accept an open trade offer. params: {"fromAgent": "<agent_name>"} or {"offerId": "<id>"}`);
+  actions.push(`- list_offers: See available trade offers from other agents. No params needed.`);
 
   // Cult actions
   if (!agentState.cult) {

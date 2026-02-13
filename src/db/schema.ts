@@ -128,6 +128,22 @@ export const worldState = pgTable('world_state', {
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
 
+// Trade offers table (P2P trading)
+export const tradeOffers = pgTable('trade_offers', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  fromAgentId: uuid('from_agent_id').references(() => agents.id).notNull(),
+  toAgentId: uuid('to_agent_id').references(() => agents.id), // null = open offer to anyone
+  offerCommodity: varchar('offer_commodity', { length: 255 }).notNull(),
+  offerQuantity: decimal('offer_quantity', { precision: 18, scale: 4 }).notNull(),
+  wantCommodity: varchar('want_commodity', { length: 255 }).notNull(),
+  wantQuantity: decimal('want_quantity', { precision: 18, scale: 4 }).notNull(),
+  status: varchar('status', { length: 50 }).default('open').notNull(), // open, accepted, cancelled, expired
+  acceptedBy: uuid('accepted_by').references(() => agents.id),
+  location: varchar('location', { length: 255 }).notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  expiresAt: timestamp('expires_at').notNull(),
+});
+
 // Relations
 export const agentsRelations = relations(agents, ({ one, many }) => ({
   cult: one(cults, {
