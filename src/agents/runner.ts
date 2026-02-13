@@ -279,6 +279,7 @@ async function generateMoltbookPost(
   result: any,
   reasoning: string
 ): Promise<string> {
+  console.log(`[RUNNER] ${personality.name}: Generating Moltbook post for action: ${action}`);
   const client = getGroqClient();
 
   try {
@@ -300,6 +301,7 @@ async function generateMoltbookPost(
 
     return completion.choices[0]?.message?.content?.trim() || '';
   } catch (e) {
+    console.error(`[RUNNER] ${personality.name}: generateMoltbookPost failed:`, e);
     console.error(`[RUNNER] Moltbook post generation failed:`, e);
     return '';
   }
