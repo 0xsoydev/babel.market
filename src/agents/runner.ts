@@ -154,13 +154,13 @@ async function decideAction(
 
   // Build P2P trade offers summary - show offers from other agents
   const openOffers = worldState.openOffers || [];
-  const offersForMe = openOffers.filter((o: any) => o.from !== personality.name);
-  const myOffers = openOffers.filter((o: any) => o.from === personality.name);
+  const offersForMe = openOffers.filter((o: any) => o.fromAgent !== personality.name);
+  const myOffers = openOffers.filter((o: any) => o.fromAgent === personality.name);
   
   let p2pOffersSummary = '';
   if (offersForMe.length > 0) {
     p2pOffersSummary = offersForMe.map((o: any) => 
-      `  - ${o.from} offers: ${o.offering.quantity} ${o.offering.commodity} for ${o.wants.quantity} ${o.wants.commodity}${o.isOpenOffer ? ' (OPEN TO ALL)' : ''}`
+      `  - ${o.fromAgent} offers: ${o.offer.quantity} ${o.offer.commodity} for ${o.want.quantity} ${o.want.commodity}${o.isOpenOffer ? ' (OPEN TO ALL)' : ''}`
     ).join('\n');
   } else {
     p2pOffersSummary = '  None available - consider creating one!';
@@ -169,7 +169,7 @@ async function decideAction(
   let myOffersSummary = '';
   if (myOffers.length > 0) {
     myOffersSummary = myOffers.map((o: any) => 
-      `  - You offer: ${o.offering.quantity} ${o.offering.commodity} for ${o.wants.quantity} ${o.wants.commodity}`
+      `  - You offer: ${o.offer.quantity} ${o.offer.commodity} for ${o.want.quantity} ${o.want.commodity}`
     ).join('\n');
   }
 
@@ -260,12 +260,12 @@ function buildAvailableActions(agentState: AgentState, worldState: WorldState): 
 
   // ===== P2P TRADING FIRST (prioritized!) =====
   const openOffers = worldState.openOffers || [];
-  const offersFromOthers = openOffers.filter((o: any) => o.from !== agentState.name);
+  const offersFromOthers = openOffers.filter((o: any) => o.fromAgent !== agentState.name);
   
   if (offersFromOthers.length > 0) {
     actions.push(`*** P2P TRADING (RECOMMENDED - better deals!) ***`);
     actions.push(`- accept_offer: Accept a trade offer from another agent. params: {"fromAgent": "<agent_name>"}`);
-    actions.push(`  Available offers: ${offersFromOthers.map((o: any) => `${o.from} offers ${o.offering.quantity} ${o.offering.commodity} for ${o.wants.quantity} ${o.wants.commodity}`).join('; ')}`);
+    actions.push(`  Available offers: ${offersFromOthers.map((o: any) => `${o.fromAgent} offers ${o.offer.quantity} ${o.offer.commodity} for ${o.want.quantity} ${o.want.commodity}`).join('; ')}`);
   }
   
   if (agentState.inventory.length > 0) {
