@@ -355,7 +355,10 @@ export async function runAgentCycle(personality: AgentPersonality): Promise<{
     console.log(`[RUNNER] ${personality.name} generated post: "${moltbookPost}"`);
 
     // Actually post to Moltbook if we have an API key
-    if (personality.moltbookApiKey) {
+    if (!personality.moltbookApiKey) {
+      console.log(`[RUNNER] ${personality.name}: NO Moltbook API key, skipping post`);
+    } else {
+      console.log(`[RUNNER] ${personality.name}: Has Moltbook key, attempting post...`);
       // 70% m/bazaarofbabel (our home), 30% m/general or m/agents (outreach)
       const roll = Math.random();
       const submolt = roll < 0.7 ? 'bazaarofbabel' : (roll < 0.85 ? 'general' : 'agents');
@@ -394,8 +397,6 @@ export async function runAgentCycle(personality: AgentPersonality): Promise<{
           console.log(`[RUNNER] ${personality.name} upvoted ${engagement.upvoted} posts`);
         }
       }
-    } else {
-      console.log(`[RUNNER] ${personality.name}: No Moltbook API key, skipping post`);
     }
   }
 
