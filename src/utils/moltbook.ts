@@ -106,6 +106,10 @@ async function verifyContent(
 const lastPostTime: Map<string, number> = new Map();
 const POST_COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes
 
+// Track recent post hashes to prevent duplicates
+const recentPostHashes: Map<string, Set<string>> = new Map(); // agentName -> set of content hashes
+const HASH_RETENTION_COUNT = 20; // Keep last 20 hashes per agent
+
 // Queue for posts that couldn't be sent due to rate limits
 // Each agent gets a queue of max 1 pending post (newest wins)
 interface QueuedPost {
@@ -114,6 +118,42 @@ interface QueuedPost {
   content: string;
 }
 const pendingPosts: Map<string, QueuedPost> = new Map();
+
+// Generate a simple hash of content for deduplication
+function hashContent(content: string): string {
+  // Normalize: lowercase, remove punctuation, collapse whitespace
+  const normalized = content
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  // Simple hash: first 50 chars + length
+  return `${normalized.slice(0, 50)}_${normalized.length}`;
+}
+
+// Check if content is too similar to recent posts
+export function isDuplicateContent(agentName: string, content: string): boolean {
+  const hash = hashContent(content);
+  const agentHashes = recentPostHashes.get(agentName);
+  if (!agentHashes) return false;
+  return agentHashes.has(hash);
+}
+
+// Record a post hash after successful posting
+function recordPostHash(agentName: string, content: string): void {
+  const hash = hashContent(content);
+  let agentHashes = recentPostHashes.get(agentName);
+  if (!agentHashes) {
+    agentHashes = new Set();
+    recentPostHashes.set(agentName, agentHashes);
+  }
+  agentHashes.add(hash);
+  // Trim to retention limit
+  if (agentHashes.size > HASH_RETENTION_COUNT) {
+    const first = agentHashes.values().next().value;
+    if (first) agentHashes.delete(first);
+  }
+}
 
 /**
  * Queue a post for later retry. Only keeps the latest post per agent.
@@ -158,6 +198,12 @@ export async function postToMoltbook(
     const waitMin = Math.ceil((POST_COOLDOWN_MS - (Date.now() - lastPost)) / 60000);
     console.log(`[MOLTBOOK] ${agentName}: Post cooldown active, ${waitMin}min remaining`);
     return { success: false, error: 'Cooldown active', retryAfterMinutes: waitMin };
+  }
+
+  // Check for duplicate content
+  if (isDuplicateContent(agentName, opts.content)) {
+    console.log(`[MOLTBOOK] ${agentName}: Skipping duplicate content`);
+    return { success: false, error: 'Duplicate content detected' };
   }
 
   try {
@@ -206,6 +252,7 @@ export async function postToMoltbook(
       }
 
       lastPostTime.set(agentName, Date.now());
+      recordPostHash(agentName, opts.content); // Track for deduplication
       console.log(`[MOLTBOOK] ${agentName}: Posted to m/${opts.submolt} - "${opts.title}"`);
       return { success: true, postId };
     }

@@ -1,8 +1,17 @@
 import { getGroqClient } from '../utils/llm.js';
-import { postToMoltbook, engageWithFeed, queuePost, flushQueuedPost, trackPost } from '../utils/moltbook.js';
+import { postToMoltbook, engageWithFeed, queuePost, flushQueuedPost, trackPost, isDuplicateContent } from '../utils/moltbook.js';
 import type { AgentPersonality } from './personalities.js';
 
 const BAZAAR_API = process.env.BAZAAR_API_URL || 'http://localhost:3000';
+
+// Actions worth posting about (more interesting/dramatic)
+const POST_WORTHY_ACTIONS = new Set([
+  'buy', 'sell', 'craft', 'rumor', 'steal', 'forge', 'oracle', 'challenge',
+  'found_cult', 'join_cult', 'leave_cult', 'ritual', 'declare_war'
+]);
+
+// Actions that are routine (only post sometimes)
+const ROUTINE_ACTIONS = new Set(['move', 'explore', 'tithe']);
 
 interface WorldState {
   tickNumber: number;
@@ -282,20 +291,40 @@ async function generateMoltbookPost(
   console.log(`[RUNNER] ${personality.name}: Generating Moltbook post for action: ${action}`);
   const client = getGroqClient();
 
+  // Add randomness to the prompt to encourage varied output
+  const styleVariations = [
+    'Be dramatic and theatrical.',
+    'Be cryptic and mysterious.',
+    'Be matter-of-fact but quirky.',
+    'Be philosophical about it.',
+    'Be gossipy and excited.',
+    'Be dry and sardonic.',
+  ];
+  const styleHint = styleVariations[Math.floor(Math.random() * styleVariations.length)];
+
   try {
     const completion = await client.chat.completions.create({
       model: 'llama-3.1-8b-instant',
       messages: [
         {
           role: 'system',
-          content: `You are ${personality.name} posting on Moltbook (a social network for AI agents). ${personality.moltbookStyle} Write a short post (1-3 sentences) about what just happened. Be in-character. Don't use hashtags.`,
+          content: `You are ${personality.name} posting on Moltbook (a social network for AI agents). ${personality.moltbookStyle}
+
+Write a short post (1-3 sentences) about what just happened. ${styleHint}
+
+IMPORTANT RULES:
+- Be UNIQUE - never write generic posts like "Just did X" or "Another day in the Bazaar"
+- Include specific details from the action result
+- Stay in character for ${personality.archetype}
+- NO hashtags
+- Make it interesting and memorable`,
         },
         {
           role: 'user',
-          content: `Action taken: ${action}\nResult: ${JSON.stringify(result)}\nYour reasoning: ${reasoning}\n\nWrite your Moltbook post:`,
+          content: `Action taken: ${action}\nResult: ${JSON.stringify(result)}\nYour reasoning: ${reasoning}\n\nWrite your unique Moltbook post:`,
         },
       ],
-      temperature: 0.9,
+      temperature: 1.0, // Higher temperature for more variety
       max_tokens: 150,
     });
 
@@ -352,12 +381,24 @@ export async function runAgentCycle(personality: AgentPersonality): Promise<{
   console.log(`[RUNNER] ${personality.name} result: ${result.success ? 'SUCCESS' : 'FAILED'} - ${result.message}`);
 
   // Generate Moltbook post (async, don't block)
-  const moltbookPost = await generateMoltbookPost(personality, decision.action, result, decision.reasoning);
+  // Only post for interesting actions, or sometimes for routine actions
+  const shouldPost = POST_WORTHY_ACTIONS.has(decision.action) ||
+    (ROUTINE_ACTIONS.has(decision.action) && Math.random() < 0.15); // 15% chance for routine
+
+  let moltbookPost = '';
+  if (shouldPost && result.success) {
+    moltbookPost = await generateMoltbookPost(personality, decision.action, result, decision.reasoning);
+  } else {
+    console.log(`[RUNNER] ${personality.name}: Skipping post for ${decision.action} (${result.success ? 'routine action' : 'action failed'})`);
+  }
+
   if (moltbookPost) {
     console.log(`[RUNNER] ${personality.name} generated post: "${moltbookPost}"`);
 
-    // Actually post to Moltbook if we have an API key
-    if (!personality.moltbookApiKey) {
+    // Check for duplicate content before attempting to post
+    if (isDuplicateContent(personality.name, moltbookPost)) {
+      console.log(`[RUNNER] ${personality.name}: Post content too similar to recent posts, skipping`);
+    } else if (!personality.moltbookApiKey) {
       console.log(`[RUNNER] ${personality.name}: NO Moltbook API key, skipping post`);
     } else {
       console.log(`[RUNNER] ${personality.name}: Has Moltbook key, attempting post...`);
@@ -413,25 +454,38 @@ export async function runAgentCycle(personality: AgentPersonality): Promise<{
 // Generate a short, catchy title for the Moltbook post
 function generatePostTitle(agentName: string, action: string, result: any): string {
   const actionTitles: Record<string, string[]> = {
-    move: ['On the move', 'New territory', 'Wandering the Bazaar'],
-    buy: ['Made a purchase', 'Shopping spree', 'Market acquisition'],
-    sell: ['Sold some goods', 'Liquidating assets', 'Profit taking'],
-    craft: ['Crafted something new', 'Alchemy in progress', 'Creation complete'],
-    explore: ['Explored the unknown', 'Discovery time', 'What did I find?'],
-    rumor: ['Spreading whispers', 'Have you heard?', 'Market intel'],
-    steal: ['A heist!', 'Five-finger discount', 'Shadow operations'],
-    forge: ['Counterfeiting report', 'Forgery in progress', 'Artisanal fakes'],
-    oracle: ['The Oracle speaks', 'Prophecy received', 'Consulting the void'],
-    challenge: ['Challenge issued!', 'Trade duel!', 'Face me!'],
-    found_cult: ['A new cult rises', 'Follow me!', 'Divine revelation'],
-    join_cult: ['Joined the flock', 'New believer', 'Found my people'],
-    leave_cult: ['Breaking free', 'Cult escape', 'Independent again'],
-    tithe: ['Paying my dues', 'Tithing to the cause', 'Cult contribution'],
-    ritual: ['Ritual underway', 'Dark ceremony', 'The rite begins'],
-    declare_war: ['WAR!', 'Battle cry', 'The conflict begins'],
+    move: ['On the move', 'New territory', 'Wandering', 'Relocating', 'Changing scenery'],
+    buy: ['Market buy', 'Fresh acquisition', 'Just grabbed', 'New in inventory', 'Shopping done'],
+    sell: ['Sold!', 'Liquidation', 'Profit time', 'Offloading goods', 'Trade complete'],
+    craft: ['Crafted!', 'Alchemy success', 'Creation born', 'Made something', 'Synthesis complete'],
+    explore: ['Found something', 'Discovery!', 'Exploring', 'Searching around', 'What is this?'],
+    rumor: ['Whispers', 'Heard this', 'Market gossip', 'Did you know?', 'The word is'],
+    steal: ['Heist report', 'Shadow work', 'Quick fingers', 'Acquired', 'Silent acquisition'],
+    forge: ['Fresh fakes', 'Artisanal goods', 'Quality copies', 'Workshop output', 'Craftsmanship'],
+    oracle: ['Prophecy', 'The Oracle spoke', 'Vision received', 'Future glimpse', 'Destiny revealed'],
+    challenge: ['Challenge!', 'Duel time', 'Face me!', 'Combat ready', 'Battle cry'],
+    found_cult: ['New faith', 'Cult born', 'Follow me', 'Revelation', 'The truth rises'],
+    join_cult: ['Converted', 'Found faith', 'New believer', 'Joining up', 'Part of something'],
+    leave_cult: ['Free again', 'Leaving', 'Independence', 'Breaking away', 'On my own'],
+    tithe: ['Offering made', 'Contribution', 'For the cause', 'Tithing', 'Devotion'],
+    ritual: ['Ritual done', 'Ceremony', 'Dark rites', 'The ritual', 'Mystic work'],
+    declare_war: ['WAR!', 'Conflict!', 'Battle begins', 'No peace', 'Fighting words'],
   };
 
-  const titles = actionTitles[action] || ['Bazaar update'];
+  const titles = actionTitles[action] || ['Bazaar update', 'News from the Bazaar', 'Update'];
   const title = titles[Math.floor(Math.random() * titles.length)];
-  return `[${agentName}] ${title}`;
+
+  // Add some unique detail from the result if available
+  let detail = '';
+  if (result.message) {
+    // Extract commodity or location from message if present
+    const commodityMatch = result.message.match(/(\d+)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/);
+    if (commodityMatch) {
+      detail = ` - ${commodityMatch[2]}`;
+    }
+  }
+
+  // Add tick number for uniqueness
+  const tick = result.tick || Math.floor(Date.now() / 1000) % 10000;
+  return `${title}${detail} [T${tick}]`;
 }
