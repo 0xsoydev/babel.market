@@ -463,46 +463,52 @@ export async function runAgentCycle(personality: AgentPersonality): Promise<{
     // Check for duplicate content before attempting to post
     if (isDuplicateContent(personality.name, moltbookPost)) {
       console.log(`[RUNNER] ${personality.name}: Post content too similar to recent posts, skipping`);
-    } else if (!personality.moltbookApiKey) {
-      console.log(`[RUNNER] ${personality.name}: NO Moltbook API key, skipping post`);
     } else {
-      console.log(`[RUNNER] ${personality.name}: Has Moltbook key, attempting post...`);
-      // 70% m/bazaarofbabel (our home), 30% m/general or m/agents (outreach)
+      // Always log social posts to our activity feed (so they appear in dashboard)
       const roll = Math.random();
       const submolt = roll < 0.7 ? 'bazaarofbabel' : (roll < 0.85 ? 'general' : 'agents');
       const title = generatePostTitle(personality.name, decision.action, result);
-      const postResult = await postToMoltbook(
-        personality.moltbookApiKey,
-        personality.name,
-        {
-          submolt,
-          title,
-          content: moltbookPost,
-        }
-      );
-      if (postResult.success) {
-        console.log(`[RUNNER] ${personality.name} posted to Moltbook! (m/${submolt})`);
-        // Track the post ID so we can poll for external comments later
-        if (postResult.postId) {
-          trackPost(postResult.postId, personality.name, submolt, title, moltbookPost);
-        }
-        // Log to audit log so it appears in the activity feed
-        await logSocialPost(personality.name, moltbookPost, title, submolt);
-      } else {
-        console.log(`[RUNNER] ${personality.name} Moltbook post skipped: ${postResult.error}`);
-        // Queue the post for retry on next cycle
-        queuePost(personality.name, { submolt, title, content: moltbookPost });
-      }
+      
+      // Log to our audit log FIRST so it appears in the activity feed
+      await logSocialPost(personality.name, moltbookPost, title, submolt);
+      console.log(`[RUNNER] ${personality.name}: Logged social post to activity feed`);
 
-      // Engage with the feed: upvote + leave in-character outreach comments
-      if (Math.random() > 0.5) {
-        const engagement = await engageWithFeed(
+      // Try to post to Moltbook if we have an API key
+      if (!personality.moltbookApiKey) {
+        console.log(`[RUNNER] ${personality.name}: NO Moltbook API key, skipping external post`);
+      } else {
+        console.log(`[RUNNER] ${personality.name}: Has Moltbook key, attempting post...`);
+        const postResult = await postToMoltbook(
           personality.moltbookApiKey,
           personality.name,
-          { moltbookStyle: personality.moltbookStyle, archetype: personality.archetype }
+          {
+            submolt,
+            title,
+            content: moltbookPost,
+          }
         );
-        if (engagement.upvoted > 0) {
-          console.log(`[RUNNER] ${personality.name} upvoted ${engagement.upvoted} posts`);
+        if (postResult.success) {
+          console.log(`[RUNNER] ${personality.name} posted to Moltbook! (m/${submolt})`);
+          // Track the post ID so we can poll for external comments later
+          if (postResult.postId) {
+            trackPost(postResult.postId, personality.name, submolt, title, moltbookPost);
+          }
+        } else {
+          console.log(`[RUNNER] ${personality.name} Moltbook post failed: ${postResult.error}`);
+          // Queue the post for retry on next cycle
+          queuePost(personality.name, { submolt, title, content: moltbookPost });
+        }
+
+        // Engage with the feed: upvote + leave in-character outreach comments
+        if (Math.random() > 0.5) {
+          const engagement = await engageWithFeed(
+            personality.moltbookApiKey,
+            personality.name,
+            { moltbookStyle: personality.moltbookStyle, archetype: personality.archetype }
+          );
+          if (engagement.upvoted > 0) {
+            console.log(`[RUNNER] ${personality.name} upvoted ${engagement.upvoted} posts`);
+          }
         }
       }
     }
