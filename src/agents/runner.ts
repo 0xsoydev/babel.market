@@ -21,6 +21,7 @@ interface WorldState {
   agents: any[];
   cults: any[];
   recentEvents: any[];
+  openOffers?: any[]; // P2P trade offers
 }
 
 interface AgentState {
@@ -42,6 +43,18 @@ async function getWorldState(): Promise<WorldState | null> {
   } catch (e) {
     console.error('[RUNNER] Failed to fetch world state:', e);
     return null;
+  }
+}
+
+// Fetch open P2P trade offers
+async function getOpenOffers(): Promise<any[]> {
+  try {
+    const res = await fetch(`${BAZAAR_API}/api/world/offers`);
+    const data = await res.json() as any;
+    return data.success ? data.offers : [];
+  } catch (e) {
+    console.error('[RUNNER] Failed to fetch open offers:', e);
+    return [];
   }
 }
 
@@ -139,6 +152,27 @@ async function decideAction(
     ? worldState.recentEvents.map((e: any) => `[Tick ${e.tick}] ${e.description}`).join('\n  ')
     : 'None';
 
+  // Build P2P trade offers summary - show offers from other agents
+  const openOffers = worldState.openOffers || [];
+  const offersForMe = openOffers.filter((o: any) => o.from !== personality.name);
+  const myOffers = openOffers.filter((o: any) => o.from === personality.name);
+  
+  let p2pOffersSummary = '';
+  if (offersForMe.length > 0) {
+    p2pOffersSummary = offersForMe.map((o: any) => 
+      `  - ${o.from} offers: ${o.offering.quantity} ${o.offering.commodity} for ${o.wants.quantity} ${o.wants.commodity}${o.isOpenOffer ? ' (OPEN TO ALL)' : ''}`
+    ).join('\n');
+  } else {
+    p2pOffersSummary = '  None available - consider creating one!';
+  }
+  
+  let myOffersSummary = '';
+  if (myOffers.length > 0) {
+    myOffersSummary = myOffers.map((o: any) => 
+      `  - You offer: ${o.offering.quantity} ${o.offering.commodity} for ${o.wants.quantity} ${o.wants.commodity}`
+    ).join('\n');
+  }
+
   const prompt = `You are ${personality.name}, ${personality.archetype} in the Bazaar of Babel.
 
 ${personality.systemPrompt}
@@ -151,7 +185,18 @@ CURRENT STATE:
 - Inventory: ${inventorySummary}
 - Jailed: ${agentState.jailedUntil ? 'YES' : 'No'}
 
-MARKET PRICES:
+===== P2P TRADE OFFERS (PRIORITY!) =====
+AVAILABLE OFFERS FROM OTHER AGENTS:
+${p2pOffersSummary}
+${myOffersSummary ? `\nYOUR ACTIVE OFFERS:\n${myOffersSummary}` : ''}
+
+IMPORTANT: P2P trading with other agents is MORE PROFITABLE than pool trading!
+- Use "accept_offer" to accept any offer above (better deals than market)
+- Use "offer" to create your own trade offers to other agents
+- Direct agent-to-agent trading builds relationships and reputation
+============================================
+
+MARKET PRICES (pool trading - less profitable):
   ${marketSummary}
 
 EXISTING CULTS: ${cultSummary}
@@ -167,6 +212,7 @@ Based on your personality and the current state, choose ONE action to take. Cons
 - Your risk tolerance: ${personality.riskTolerance * 100}%
 - Your preferred locations: ${personality.preferredLocations.join(', ')}
 - Your cult behavior: ${personality.cultBehavior}
+- STRONGLY PREFER P2P trading (offer/accept_offer) over pool trading (buy/sell)!
 
 Respond with EXACTLY this JSON format and nothing else:
 {"action": "<action_name>", "params": {<params>}, "reasoning": "<1 sentence why>"}`;
@@ -212,23 +258,37 @@ function buildAvailableActions(agentState: AgentState, worldState: WorldState): 
   const loc = agentState.location;
   const coins = parseFloat(agentState.babelCoins);
 
-  // Always available
+  // ===== P2P TRADING FIRST (prioritized!) =====
+  const openOffers = worldState.openOffers || [];
+  const offersFromOthers = openOffers.filter((o: any) => o.from !== agentState.name);
+  
+  if (offersFromOthers.length > 0) {
+    actions.push(`*** P2P TRADING (RECOMMENDED - better deals!) ***`);
+    actions.push(`- accept_offer: Accept a trade offer from another agent. params: {"fromAgent": "<agent_name>"}`);
+    actions.push(`  Available offers: ${offersFromOthers.map((o: any) => `${o.from} offers ${o.offering.quantity} ${o.offering.commodity} for ${o.wants.quantity} ${o.wants.commodity}`).join('; ')}`);
+  }
+  
+  if (agentState.inventory.length > 0) {
+    actions.push(`- offer: Create a P2P trade offer for another agent (RECOMMENDED). params: {"offerCommodity": "<name>", "offerQuantity": <n>, "wantCommodity": "<name>", "wantQuantity": <n>, "toAgent": "<optional agent name>"}`);
+  }
+
+  // Movement
+  actions.push(`*** MOVEMENT ***`);
   const otherLocations = ['grand_atrium', 'whispering_corridor', 'shady_alley', 'cult_quarter', 'oracles_alcove', 'paradox_pit']
     .filter(l => l !== loc);
   actions.push(`- move: Move to another location. params: {"location": "${otherLocations[0]}"} (options: ${otherLocations.join(', ')})`);
   actions.push(`- explore: Search current location for items or coins. No params needed.`);
 
-  // Trading (need coins)
+  // Pool trading (less preferred)
+  actions.push(`*** POOL TRADING (less profitable than P2P) ***`);
   if (coins > 0) {
     const affordable = worldState.commodities.filter((c: any) => parseFloat(c.currentPrice) <= coins);
     if (affordable.length > 0) {
-      actions.push(`- buy: Buy a commodity. params: {"commodity": "<name>", "quantity": <n>}`);
+      actions.push(`- buy: Buy from market pool. params: {"commodity": "<name>", "quantity": <n>}`);
     }
   }
-
-  // Selling (need inventory)
   if (agentState.inventory.length > 0) {
-    actions.push(`- sell: Sell a commodity. params: {"commodity": "<name>", "quantity": <n>}`);
+    actions.push(`- sell: Sell to market pool. params: {"commodity": "<name>", "quantity": <n>}`);
   }
 
   // Crafting (need 2+ items)
@@ -260,13 +320,6 @@ function buildAvailableActions(agentState: AgentState, worldState: WorldState): 
   if (otherAgents.length > 0 && coins >= 10) {
     actions.push(`- challenge: Challenge another agent to a trade duel. params: {"target": "<agent_name>", "wager": <amount>}`);
   }
-
-  // P2P Trading (offer/accept trades with other agents)
-  if (agentState.inventory.length > 0) {
-    actions.push(`- offer: Create a trade offer for another agent. params: {"offerCommodity": "<name>", "offerQuantity": <n>, "wantCommodity": "<name>", "wantQuantity": <n>, "toAgent": "<optional agent name>"}`);
-  }
-  actions.push(`- accept_offer: Accept an open trade offer. params: {"fromAgent": "<agent_name>"} or {"offerId": "<id>"}`);
-  actions.push(`- list_offers: See available trade offers from other agents. No params needed.`);
 
   // Cult actions
   if (!agentState.cult) {
@@ -364,15 +417,19 @@ export async function runAgentCycle(personality: AgentPersonality): Promise<{
     return { action: 'none', result: { error: 'Failed to enter' }, reasoning: 'Entry failed', moltbookPost: '' };
   }
 
-  // Get states
-  const [worldState, agentState] = await Promise.all([
+  // Get states (including open P2P offers)
+  const [worldState, agentState, openOffers] = await Promise.all([
     getWorldState(),
     getAgentState(personality.name),
+    getOpenOffers(),
   ]);
 
   if (!worldState || !agentState) {
     return { action: 'none', result: { error: 'Failed to get state' }, reasoning: 'State fetch failed', moltbookPost: '' };
   }
+
+  // Attach open offers to world state for decision making
+  worldState.openOffers = openOffers;
 
   // If jailed, just wait
   if (agentState.jailedUntil && new Date(agentState.jailedUntil) > new Date()) {
