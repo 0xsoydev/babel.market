@@ -190,6 +190,7 @@ async function decideAction(
   const agentMessages = worldState.agentMessages || { inbox: [], broadcasts: [] };
   const recentInbox = agentMessages.inbox.slice(0, 5);
   const recentBroadcasts = agentMessages.broadcasts.slice(0, 5);
+  const unreadCount = recentInbox.length;
   
   let messagesSummary = '';
   if (recentInbox.length > 0) {
@@ -210,6 +211,24 @@ async function decideAction(
   const agentsAtMyLocation = worldState.agents
     .filter((a: any) => a.name !== personality.name && a.location === agentState.location)
     .map((a: any) => a.name);
+
+  // Build communication triggers
+  const communicationNudges: string[] = [];
+  if (unreadCount > 0) {
+    communicationNudges.push(`⚠️ You have ${unreadCount} unread DM${unreadCount > 1 ? 's' : ''} - consider responding!`);
+  }
+  if (agentsAtMyLocation.length > 0) {
+    communicationNudges.push(`${agentsAtMyLocation.length} agent(s) at your location - consider broadcasting or DMing them`);
+  }
+  if (agentState.inventory.length > 0 && !agentState.jailedUntil) {
+    communicationNudges.push(`You have items to trade - DM agents to negotiate P2P deals before creating offers`);
+  }
+  const hasRecentTheft = worldState.recentEvents.some((e: any) => 
+    e.description.includes('stole from') && e.description.includes(personality.name)
+  );
+  if (hasRecentTheft) {
+    communicationNudges.push(`Someone stole from you recently - consider sending a threatening message!`);
+  }
 
   const prompt = `You are ${personality.name}, ${personality.archetype} in the Bazaar of Babel.
 
@@ -246,10 +265,16 @@ RECENT WORLD EVENTS:
 ===== COMMUNICATION =====
 ${messagesSummary}
 
-You can communicate with other agents:
-- Use "message" to send a DM to a specific agent: {"to": "<agent_name>", "content": "<your message>"}
-- Use "broadcast" to announce to everyone at your location: {"content": "<your message>"}
-Consider responding to messages or starting conversations to build alliances!
+COMMUNICATION TRIGGERS (consider messaging when):
+${communicationNudges.length > 0 ? communicationNudges.map(n => `  • ${n}`).join('\n') : '  • No urgent communication needs right now'}
+
+Your communication style: ${personality.communicationStyle}
+
+Available communication actions:
+- "message" to send a DM: {"to": "<agent_name>", "content": "<your message>"}
+- "broadcast" to announce at your location: {"content": "<your message>"}
+
+IMPORTANT: Communication builds relationships, sets up trades, and establishes dominance!
 =========================
 
 AVAILABLE ACTIONS:
@@ -260,7 +285,9 @@ Based on your personality and the current state, choose ONE action to take. Cons
 - Your risk tolerance: ${personality.riskTolerance * 100}%
 - Your preferred locations: ${personality.preferredLocations.join(', ')}
 - Your cult behavior: ${personality.cultBehavior}
+- Your communication style: ${personality.communicationStyle}
 - STRONGLY PREFER P2P trading (offer/accept_offer) over pool trading (buy/sell)!
+- USE COMMUNICATION frequently to negotiate, threaten, recruit, or respond to messages!
 
 Respond with EXACTLY this JSON format and nothing else:
 {"action": "<action_name>", "params": {<params>}, "reasoning": "<1 sentence why>"}`;
